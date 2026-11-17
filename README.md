@@ -20,17 +20,13 @@ prj_churn/
 │  ├─ lineage.py       # data_md5() e git_commit()
 │  ├─ registry.py      # Model Registry — register, aliases @champion/@challenger
 │  ├─ predict.py       # inferência em lote via @champion (pyfunc)
-│  ├─ pipeline.py      # tarefas do DAG (Python puro, testável sem Airflow)
 │  └─ app.py           # API REST FastAPI (GET /health, POST /predict)
-├─ dags/
-│  └─ churn_training.py # DAG do Airflow (enc. 9–11)
-├─ tests/              # pytest (data, features, schema, pipeline, dag, app)
+├─ tests/              # pytest (data, features, schema, app)
 ├─ data/
 │  ├─ churn.csv.dvc    # ponteiro DVC (o .csv fica no remote)
 │  └─ .gitignore
 ├─ Dockerfile          # imagem com uv (enc. 3)
-├─ Dockerfile.airflow  # Airflow + pacote churn (enc. 11)
-├─ compose.yml         # docker compose (enc. 3, 11, 12)
+├─ compose.yml         # docker compose (enc. 3)
 ├─ dvc.yaml            # pipeline reproduzível (enc. 5)
 └─ pyproject.toml      # dependências travadas (uv)
 ```
@@ -171,79 +167,14 @@ uv run python -m churn.predict --input data/churn.csv --output predictions.csv
 | `print(accuracy)` e esquece | MLflow registra params, métricas e artefatos |
 | modelo em arquivo pkl sem rastreamento | Model Registry com aliases `@champion`/`@challenger` |
 | inferência acoplada ao código de treino | `predict.py` carrega `@champion` via pyfunc (agnóstico) |
-| retreino manual, "quando alguém lembra" | DAG semanal no Airflow com quality gate e champion × challenger |
 
-## Bloco 3 — Orquestração (Encontros 9–11)
-
-O retreino vira um **DAG** do Airflow (`dags/churn_training.py`):
-
-```
-validate_data → train_candidate → quality_gate → decide_promotion
-                                                 ├─ promote_champion     (candidato > campeão)
-                                                 └─ register_challenger  (caso contrário)
-```
-
-A lógica das tarefas mora em `src/churn/pipeline.py` — Python puro, sem `import airflow`.
-O DAG só descreve **ordem, agendamento e política de falha**. Assim as tarefas são
-testadas com pytest e o pipeline roda localmente sem scheduler:
-
-```bash
-MLFLOW_TRACKING_URI=sqlite:///mlflow.db uv run python -m churn.pipeline
-```
-
-```
-[validate] 7043 linhas, churn=26.5%
-[train]    run=abc12345 roc_auc=0.8195
-[registry] v1 → @champion
-```
-
-### Encontro 9 — DAG e tarefas
-
-- TaskFlow API (`@dag`, `@task`): o retorno de uma tarefa vira entrada da próxima.
-- `schedule="@weekly"`, `catchup=False`, `max_active_runs=1`.
-
-### Encontro 10 — XCom, branching e quality gate
-
-- **XCom** carrega só o que é pequeno e serializável: `run_id` e métricas. Modelo e
-  DataFrame ficam no MLflow/disco.
-- **Quality gate:** `roc_auc < CHURN_MIN_ROC_AUC` (padrão 0.75) falha o DAG antes de
-  tocar no Registry. Essa tarefa tem `retries=0` — reprovar é decisão, não erro transitório.
-- **Branching (`@task.branch`):** o candidato vira `@champion` só se superar o `roc_auc`
-  do campeão atual; senão é registrado como `@challenger`. O ramo não escolhido fica `skipped`.
-- Demais tarefas: `retries=2`, `retry_delay=5min`.
-
-### Encontro 11 — Airflow em container
-
-```bash
-docker compose up airflow                         # UI em http://localhost:8080
-docker compose logs airflow | grep -i password    # senha do usuário admin
-```
-
-O serviço monta `dags/`, `src/`, `data/`, `artifacts/` e `mlruns/` (o backend do
-MLflow fica em `mlruns/mlflow.db`). Ative o DAG `churn_training` na UI ou dispare:
-
-```bash
-docker compose exec airflow airflow dags trigger churn_training
-```
-
-Testando o DAG fora do container (Airflow fica fora do `pyproject` de propósito — é
-pesado e tem *constraints* próprias):
-
-```bash
-pip install "apache-airflow==2.10.5" -e .   # em um venv separado, Python 3.11
-airflow dags test churn_training 2026-01-01   # executa o DAG inteiro, sem scheduler
-pytest tests/test_dag.py                      # integridade (pulado se não houver Airflow)
-```
-
----
-
-## Bloco 4 — Serving (Encontro 12)
+## Bloco 3 — Serving (Encontro 12)
 
 ### FastAPI
 
 ```bash
 # 1. treine o modelo primeiro (gera artifacts/churn_model.pkl)
-uv run python -m churn.model          # ou: uv run python -m churn.pipeline / DAG do Airflow
+uv run python -m churn.model
 
 # 2. suba a API
 uv run uvicorn churn.app:app --reload --port 8000
@@ -285,5 +216,6 @@ docker compose up api
 
 ## Próximos encontros
 
-- **Enc. 13–14** — CI/CD.
+- **Enc. 9–11** — Orquestração com Airflow.
+- **Enc. 12–14** — Serving com FastAPI + CI/CD.
 - **Enc. 15** — Monitoramento com Evidently.

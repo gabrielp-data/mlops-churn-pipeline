@@ -31,9 +31,6 @@ class Settings(BaseSettings):
     random_state: int = 42
     n_estimators: int = 200
 
-    # orquestração (enc. 9–11): quality gate do candidato
-    min_roc_auc: float = 0.75
-
     # saída
     artifact_path: Path = Path("artifacts/churn_model.pkl")
 
