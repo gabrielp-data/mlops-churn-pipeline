@@ -30,3 +30,47 @@ def raw_frame() -> pd.DataFrame:
             "Churn": ["No", "Yes", "No", "Yes"],
         }
     )
+
+
+def make_synthetic(n: int = 200, seed: int = 0) -> pd.DataFrame:
+    """Dataset sintético no formato do Telco, com sinal aprendível."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    tenure = rng.integers(0, 73, n)
+    monthly = rng.uniform(20, 110, n).round(2)
+    contract = rng.choice(["Month-to-month", "One year", "Two year"], n)
+    churn = np.where((contract == "Month-to-month") & (tenure < 24), "Yes", "No")
+    yes_no = lambda: rng.choice(["Yes", "No"], n)  # noqa: E731
+    return pd.DataFrame({
+        "customerID": [f"C{i:04d}" for i in range(n)],
+        "gender": rng.choice(["Male", "Female"], n),
+        "SeniorCitizen": rng.integers(0, 2, n),
+        "Partner": yes_no(), "Dependents": yes_no(), "tenure": tenure,
+        "PhoneService": "Yes", "MultipleLines": "No", "InternetService": "DSL",
+        "OnlineSecurity": "No", "OnlineBackup": "No", "DeviceProtection": "No",
+        "TechSupport": "No", "StreamingTV": "No", "StreamingMovies": "No",
+        "Contract": contract, "PaperlessBilling": yes_no(),
+        "PaymentMethod": "Electronic check", "MonthlyCharges": monthly,
+        "TotalCharges": (monthly * tenure).round(2).astype(str), "Churn": churn,
+    })
+
+
+@pytest.fixture()
+def mlflow_env(tmp_path, monkeypatch):
+    """CSV sintético + MLflow (tracking e registry) isolados em tmp_path."""
+    import mlflow
+
+    from churn.config import Settings
+
+    data_path = tmp_path / "churn.csv"
+    make_synthetic().to_csv(data_path, index=False)
+    monkeypatch.chdir(tmp_path)
+    mlflow.set_tracking_uri(f"sqlite:///{tmp_path / 'mlflow.db'}")
+    yield Settings(
+        data_path=data_path,
+        artifact_path=tmp_path / "artifacts" / "churn_model.pkl",
+        champion_dir=tmp_path / "artifacts" / "champion",
+        n_estimators=20,
+    )
+    mlflow.set_tracking_uri(None)

@@ -1,8 +1,23 @@
 stages:
-  treino:
-    cmd: uv run python -m churn.model
+  treino_e_tuning:
+    cmd: uv run python -m churn.experiments
     deps:
       - data/churn.csv
-      - src/churn
+      - src/churn/data.py
+      - src/churn/schema.py
+      - src/churn/features.py
+      - src/churn/model.py
+      - src/churn/experiments.py
     outs:
-      - artifacts/churn_model.pkl
+      - mlflow.db:              # tracking + registry do MLflow
+          cache: false
+          persist: true
+
+  promover_modelo:
+    cmd: uv run python -m churn.registry && uv run python -m churn.registry --export
+    deps:
+      - mlflow.db
+      - src/churn/registry.py
+    outs:
+      - artifacts/champion:
+          cache: false

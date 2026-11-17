@@ -15,11 +15,30 @@ services:
       - ./mlruns:/app/mlruns
     command: uv run python -m churn.experiments
 
+  # Encontro 12 — API servindo o @champion exportado (uv run python -m churn.registry --export)
   api:
     build: .
     ports:
       - "8000:8000"
+    environment:
+      CHURN_MODEL_URI: /app/artifacts/champion
     volumes:
-      - ./src:/app/src
-      - ./artifacts:/app/artifacts
-    command: uv run uvicorn churn.app:app --host 0.0.0.0 --port 8000
+      - ./artifacts:/app/artifacts:ro
+      - ./data:/app/data:ro     # base histórica para GET /predict/{customer_id}
+    command: uv run --no-sync uvicorn churn.app:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      retries: 5
+
+  # painel Streamlit que consome a API
+  painel:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      API_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    command: uv run --no-sync streamlit run src/churn/dashboard.py --server.address 0.0.0.0 --server.port 8501

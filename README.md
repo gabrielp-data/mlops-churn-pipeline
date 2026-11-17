@@ -14,20 +14,21 @@ prj_churn/
 │  ├─ data.py          # carga, limpeza, validação (pandera)
 │  ├─ schema.py        # ChurnSchema — contrato de dados
 │  ├─ features.py      # transformações puras + encoder sem vazamento
-│  ├─ model.py         # treino + MLflow tracking + signature
+│  ├─ model.py         # Pipeline sklearn (features → encoder → RF) + MLflow
 │  ├─ evaluate.py      # métricas
 │  ├─ experiments.py   # grid rastreado (MLflow)
 │  ├─ lineage.py       # data_md5() e git_commit()
-│  ├─ registry.py      # Model Registry — register, aliases @champion/@challenger
+│  ├─ registry.py      # Model Registry — @champion, metadados e export
 │  ├─ predict.py       # inferência em lote via @champion (pyfunc)
-│  └─ app.py           # API REST FastAPI (GET /health, POST /predict)
-├─ tests/              # pytest (data, features, schema, app)
+│  ├─ app.py           # API FastAPI servindo o @champion
+│  └─ dashboard.py     # painel Streamlit que consome a API
+├─ tests/              # pytest (data, features, schema, registry, app)
 ├─ data/
 │  ├─ churn.csv.dvc    # ponteiro DVC (o .csv fica no remote)
 │  └─ .gitignore
 ├─ Dockerfile          # imagem com uv (enc. 3)
-├─ compose.yml         # docker compose (enc. 3)
-├─ dvc.yaml            # pipeline reproduzível (enc. 5)
+├─ compose.yml         # treino, grid, api e painel
+├─ dvc.yaml            # treino_e_tuning → promover_modelo
 └─ pyproject.toml      # dependências travadas (uv)
 ```
 
@@ -131,17 +132,26 @@ Carregar o campeão em código:
 ```python
 from churn.registry import load_champion
 model = load_champion()            # pyfunc — agnóstico de framework
-preds = model.predict(features_df)
+preds = model.predict(features_df)   # dado cru: o pipeline faz o pré-processamento
 ```
 
 ### Encontro 8 — Empacotamento (MLflow Models)
 
-O `model.py` agora registra **assinatura** e **exemplo de entrada** junto ao artefato:
+O modelo registrado é um **`sklearn.Pipeline` completo**, não só o Random Forest:
+
+```
+dado cru (19 colunas) → features derivadas → encoding das categóricas → RandomForest
+```
+
+Quem consome (lote, API, painel) entrega o **dado cru** e recebe a predição —
+treino e inferência usam exatamente as mesmas transformações, sem reimplementar nada.
+Cada run (inclusive as 9 do grid) loga o pipeline com **assinatura**, **exemplo de entrada**
+e as tags de linhagem `data_md5` (DVC) e `git_commit`:
 
 ```python
-signature = infer_signature(x_train_enc, model.predict(x_train_enc))
-mlflow.sklearn.log_model(model, artifact_path="model",
-                         signature=signature, input_example=x_train_enc.iloc[:5])
+mlflow.sklearn.log_model(pipe, name="model", signature=signature,
+                         input_example=x_train.iloc[:5],
+                         skops_trusted_types=TRUSTED_TYPES)  # MLflow 3 serializa com skops
 ```
 
 Inferência em lote com o `@champion`:
@@ -149,6 +159,15 @@ Inferência em lote com o `@champion`:
 ```bash
 uv run python -m churn.predict --input data/churn.csv --output predictions.csv
 ```
+
+### Orquestração do ML Pipeline com DVC
+
+O `dvc.yaml` encadeia as duas etapas — `dvc repro` só re-executa o que mudou:
+
+| etapa | comando | saída |
+|---|---|---|
+| `treino_e_tuning` | `python -m churn.experiments` (grid de 9 runs) | `mlflow.db` |
+| `promover_modelo` | `python -m churn.registry` + `--export` | `artifacts/champion/` |
 
 ---
 
@@ -166,50 +185,75 @@ uv run python -m churn.predict --input data/churn.csv --output predictions.csv
 | dataset solto no disco | `churn.csv.dvc` — versionado pelo DVC |
 | `print(accuracy)` e esquece | MLflow registra params, métricas e artefatos |
 | modelo em arquivo pkl sem rastreamento | Model Registry com aliases `@champion`/`@challenger` |
-| inferência acoplada ao código de treino | `predict.py` carrega `@champion` via pyfunc (agnóstico) |
+| inferência acoplada ao código de treino | `@champion` é um pipeline completo: lote, API e painel recebem o dado cru |
+| modelo sem interface | FastAPI (`/predict`, `/model-info`) + painel Streamlit |
 
-## Bloco 3 — Serving (Encontro 12)
+## Bloco 3 — Serviço do modelo (Encontro 12)
 
-### FastAPI
+### FastAPI servindo o `@champion`
 
 ```bash
-# 1. treine o modelo primeiro (gera artifacts/churn_model.pkl)
-uv run python -m churn.model
-
-# 2. suba a API
-uv run uvicorn churn.app:app --reload --port 8000
+uv run python -m churn.experiments             # 1. grid de 9 runs
+uv run python -m churn.registry                # 2. melhor run → @champion
+uv run uvicorn churn.app:app --reload --port 8000   # 3. API (lê direto do Registry)
 ```
 
 - **Docs interativas:** http://localhost:8000/docs
-- **Health check:** http://localhost:8000/health
 
-Exemplo de chamada:
+| rota | o que faz |
+|---|---|
+| `GET /health` | API no ar? modelo e base de clientes carregados? |
+| `GET /model-info` | versão, run, métricas, hiperparâmetros e linhagem (DVC + git) do `@champion` |
+| `GET /predict/{customer_id}` | predição para um cliente da base histórica (+ churn real) |
+| `POST /predict/{customer_id}` | simulação "e se": troca `tenure`/`MonthlyCharges`/`TotalCharges` |
+| `POST /predict` | cliente novo, informando todas as colunas |
 
 ```bash
-curl -s -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{
-    "gender": "Male", "SeniorCitizen": 0, "Partner": "Yes",
-    "Dependents": "No", "tenure": 12, "PhoneService": "Yes",
-    "MultipleLines": "No", "InternetService": "DSL",
-    "OnlineSecurity": "No", "OnlineBackup": "No",
-    "DeviceProtection": "No", "TechSupport": "No",
-    "StreamingTV": "No", "StreamingMovies": "No",
-    "Contract": "Month-to-month", "PaperlessBilling": "Yes",
-    "PaymentMethod": "Electronic check",
-    "MonthlyCharges": 55.5, "TotalCharges": 666.0
-  }'
+curl -s localhost:8000/predict/7590-VHVEG
+curl -s -X POST localhost:8000/predict/7590-VHVEG \
+  -H "Content-Type: application/json" -d '{"tenure": 48, "TotalCharges": 1430.0}'
 ```
 
-Resposta:
+Resposta (valores ilustrativos):
+
 ```json
-{"churn": true, "churn_probability": 0.72, "label": "Yes"}
+{"churn": false, "churn_probability": 0.21, "label": "No", "risk": "Baixo",
+ "model_version": 1, "customer_id": "7590-VHVEG", "actual_churn": "No",
+ "customer_source": "base_historica_com_simulacao",
+ "simulated_values": {"tenure": 48, "TotalCharges": 1430.0}}
 ```
 
-Ou com Docker Compose:
+O contrato de entrada é o mesmo do `ChurnSchema`: categoria fora do contrato
+(ex.: `"Contract": "Vitalicio"`) ou `tenure` fora de 0–72 → **422**, sem chute.
+Sem modelo carregado a API sobe mesmo assim: `/health` mostra `model_loaded: false`
+e as predições respondem **503** com o motivo.
+
+### De onde a API carrega o modelo
+
+| `CHURN_MODEL_URI` | uso |
+|---|---|
+| `models:/churn@champion` (padrão) | dev local — direto do Model Registry (`mlflow.db`) |
+| `artifacts/champion` | container — cópia exportada com `python -m churn.registry --export` |
+
+O Registry vive no `mlflow.db` local, com caminhos absolutos para o `mlruns/`. Por isso,
+antes de subir o container, o `@champion` é **exportado** para `artifacts/champion/`
+(pacote MLflow + `champion_info.json` com versão, métricas e linhagem).
+
+### Painel Streamlit
 
 ```bash
-docker compose up api
+uv run streamlit run src/churn/dashboard.py    # http://localhost:8501
+```
+
+Três abas: **consulta por cliente** (com simulação "e se"), **novo cliente** (formulário
+completo) e **modelo @champion** (versão, métricas, linhagem e hiperparâmetros).
+O painel só conversa com a API (`API_URL`); ele não carrega o modelo.
+
+### Docker Compose
+
+```bash
+uv run python -m churn.registry --export   # gera artifacts/champion/
+docker compose up --build api painel       # API :8000 + painel :8501
 ```
 
 ---
@@ -217,5 +261,5 @@ docker compose up api
 ## Próximos encontros
 
 - **Enc. 9–11** — Orquestração com Airflow.
-- **Enc. 12–14** — Serving com FastAPI + CI/CD.
+- **Enc. 13–14** — CI/CD com GitHub Actions.
 - **Enc. 15** — Monitoramento com Evidently.

@@ -7,7 +7,7 @@ ENV UV_LINK_MODE=copy \
 WORKDIR /app
 
 # deps primeiro (cache separado do código)
-COPY pyproject.toml uv.lock* ./
+COPY pyproject.toml uv.lock* README.md ./
 RUN uv sync --frozen --no-install-project
 
 # código
@@ -15,4 +15,5 @@ COPY src/ ./src/
 RUN uv sync --frozen
 
 # o dado NÃO é copiado: vem via dvc pull ou bind mount em dev
+EXPOSE 8000 8501
 CMD ["uv", "run", "python", "-m", "churn.model"]

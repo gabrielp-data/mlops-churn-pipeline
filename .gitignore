@@ -4,6 +4,7 @@ __pycache__/
 artifacts/
 .env
 mlruns/
+mlflow.db
 # dados: versionados pelo DVC
 /data/*.csv
 .pytest_cache/

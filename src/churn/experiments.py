@@ -2,53 +2,38 @@
 
 Uso: ``uv run python -m churn.experiments``
 
-Roda 9 combinações (n_estimators × max_depth), registra params e métricas no
-MLflow. Depois: ``uv run mlflow ui`` para comparar os runs em localhost:5000.
+Roda 9 combinações (n_estimators × max_depth). Cada run registra params,
+métricas, linhagem (git + DVC) e o **modelo** — é ele que o Registry promove
+a ``@champion`` depois. Compare os runs com ``uv run mlflow ui``.
 """
 from __future__ import annotations
 
 import mlflow
-import mlflow.sklearn
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
 
-from churn.config import settings as cfg
-from churn.data import load_clean
+from churn.config import Settings, settings
 from churn.evaluate import evaluate
-from churn.features import (
-    CategoricalEncoder,
-    add_derived_features,
-    split_features_target,
-)
+from churn.model import EXPERIMENT, build_pipeline, load_split, log_pipeline
+
+GRID_N_ESTIMATORS = (100, 200, 500)
+GRID_MAX_DEPTH = (None, 8, 16)
 
 
-def run_grid() -> None:
-    frame = add_derived_features(
-        load_clean(cfg.data_path, cfg.id_column, cfg.target)
-    )
-    X, y = split_features_target(frame, cfg.target, cfg.positive_label)
-    x_tr, x_te, y_tr, y_te = train_test_split(
-        X, y, test_size=cfg.test_size, random_state=cfg.random_state, stratify=y,
-    )
-    enc = CategoricalEncoder().fit(x_tr)
-    x_tr_e, x_te_e = enc.transform(x_tr), enc.transform(x_te)
+def run_grid(cfg: Settings = settings) -> None:
+    x_train, x_test, y_train, y_test = load_split(cfg)
 
-    mlflow.set_experiment("churn")
-    for n in (100, 200, 500):
-        for depth in (None, 8, 16):
+    mlflow.set_experiment(EXPERIMENT)
+    for n in GRID_N_ESTIMATORS:
+        for depth in GRID_MAX_DEPTH:
             with mlflow.start_run(run_name=f"rf-n{n}-d{depth}"):
                 mlflow.log_params({"n_estimators": n, "max_depth": depth})
-                model = RandomForestClassifier(
-                    n_estimators=n,
-                    max_depth=depth,
-                    random_state=cfg.random_state,
-                ).fit(x_tr_e, y_tr)
-                mlflow.log_metrics(evaluate(model, x_te_e, y_te))
+                pipe = build_pipeline(cfg, n_estimators=n, max_depth=depth).fit(x_train, y_train)
+                mlflow.log_metrics(evaluate(pipe, x_test, y_test))
+                log_pipeline(pipe, x_train, cfg)
 
 
 def find_best() -> None:
     runs = mlflow.search_runs(
-        experiment_names=["churn"],
+        experiment_names=[EXPERIMENT],
         order_by=["metrics.roc_auc DESC"],
     )
     best = runs.iloc[0]

@@ -34,5 +34,11 @@ class Settings(BaseSettings):
     # saída
     artifact_path: Path = Path("artifacts/churn_model.pkl")
 
+    # serving (enc. 12): de onde a API carrega o modelo.
+    # "models:/churn@champion" → direto do Registry (dev local);
+    # um diretório (ex.: artifacts/champion) → cópia exportada (container).
+    model_uri: str = "models:/churn@champion"
+    champion_dir: Path = Path("artifacts/champion")
+
 
 settings = Settings()

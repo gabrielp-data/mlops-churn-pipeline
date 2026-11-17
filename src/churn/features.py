@@ -11,6 +11,7 @@ script original era desnecessária.
 from __future__ import annotations
 
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import OrdinalEncoder
 
 
@@ -30,7 +31,7 @@ def split_features_target(
     return features, labels
 
 
-class CategoricalEncoder:
+class CategoricalEncoder(BaseEstimator, TransformerMixin):
     """Codifica colunas categóricas em inteiros.
 
     Aprende as categorias no ``fit`` (apenas com o treino) e as aplica no
@@ -44,7 +45,7 @@ class CategoricalEncoder:
         )
         self._columns: list[str] = []
 
-    def fit(self, features: pd.DataFrame) -> "CategoricalEncoder":
+    def fit(self, features: pd.DataFrame, y=None) -> "CategoricalEncoder":
         self._columns = features.select_dtypes(include=["object", "string"]).columns.tolist()
         self._encoder.fit(features[self._columns])
         return self
@@ -54,5 +55,5 @@ class CategoricalEncoder:
         out[self._columns] = self._encoder.transform(out[self._columns])
         return out
 
-    def fit_transform(self, features: pd.DataFrame) -> pd.DataFrame:
+    def fit_transform(self, features: pd.DataFrame, y=None) -> pd.DataFrame:
         return self.fit(features).transform(features)
