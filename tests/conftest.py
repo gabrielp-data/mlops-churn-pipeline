@@ -74,3 +74,29 @@ def mlflow_env(tmp_path, monkeypatch):
         n_estimators=20,
     )
     mlflow.set_tracking_uri(None)
+
+
+@pytest.fixture(scope="session")
+def exported_champion(tmp_path_factory):
+    """Treina, registra, promove e exporta um @champion (uma vez por sessão de testes)."""
+    import mlflow
+
+    from churn import registry
+    from churn.config import Settings
+    from churn.model import train
+
+    tmp = tmp_path_factory.mktemp("champion")
+    data_path = tmp / "churn.csv"
+    make_synthetic().to_csv(data_path, index=False)
+    mp = pytest.MonkeyPatch()
+    mp.chdir(tmp)
+    mlflow.set_tracking_uri(f"sqlite:///{tmp / 'mlflow.db'}")
+    cfg = Settings(data_path=data_path, artifact_path=tmp / "m.pkl",
+                   champion_dir=tmp / "champion", n_estimators=20)
+    train(cfg)
+    mv = registry.register_model(mlflow.last_active_run().info.run_id)
+    registry.promote_champion(int(mv.version))
+    registry.export_champion(cfg.champion_dir)
+    mlflow.set_tracking_uri(None)
+    mp.undo()
+    return cfg

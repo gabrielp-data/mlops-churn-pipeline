@@ -42,3 +42,35 @@ services:
       api:
         condition: service_healthy
     command: uv run --no-sync streamlit run src/churn/dashboard.py --server.address 0.0.0.0 --server.port 8501
+
+  # --- Arquitetura da AWS reproduzida localmente (two-tier) -----------------
+  # uv run python -m churn.registry --export && docker compose up --build app-v2
+  postgres:                    # camada de dados (na AWS: EC2 churn-db-host)
+    image: postgres:15
+    environment:
+      POSTGRES_DB: churn_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-churn-local}
+    volumes:
+      - ./data/churn.csv:/tmp/churn.csv:ro
+      - ./infra/db/init_customers.sql:/docker-entrypoint-initdb.d/init_customers.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "churn_db"]
+      interval: 5s
+      retries: 10
+
+  app-v2:                      # camada de aplicação (na AWS: EC2 churn-app-host)
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    ports:
+      - "8502:8501"            # painel v2 (8502 local para não conflitar com o painel)
+      - "8001:8000"            # API v2 (exposta só para teste local)
+    environment:
+      DB_HOST: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-churn-local}
+    depends_on:
+      postgres:
+        condition: service_healthy

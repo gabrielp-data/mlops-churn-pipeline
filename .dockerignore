@@ -8,3 +8,6 @@ artifacts/
 data/*.csv
 .env
 *.pkl
+# exceções usadas pelo Dockerfile.app (imagem da AWS)
+!artifacts/champion/
+!data/churn.csv

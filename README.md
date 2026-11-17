@@ -21,13 +21,24 @@ prj_churn/
 │  ├─ registry.py      # Model Registry — @champion, metadados e export
 │  ├─ predict.py       # inferência em lote via @champion (pyfunc)
 │  ├─ app.py           # API FastAPI servindo o @champion
-│  └─ dashboard.py     # painel Streamlit que consome a API
-├─ tests/              # pytest (data, features, schema, registry, app)
+│  ├─ dashboard.py     # painel Streamlit que consome a API
+│  ├─ scoring.py       # AWS: ChampionModel (export) + contrato de entrada + risco
+│  ├─ batch_scoring.py # AWS v1: pontuação em lote → parquet
+│  ├─ api_lookup.py    # AWS v1: API que só consulta o parquet
+│  ├─ app_churn_v1.py  # AWS v1: tela de consulta
+│  ├─ db.py            # AWS v2: conexão com o PostgreSQL via variáveis de ambiente
+│  ├─ api_v2.py        # AWS v2: SELECT no PostgreSQL + inferência online
+│  └─ app_churn_v2.py  # AWS v2: tela (consulta no banco + nova inferência)
+├─ tests/              # pytest (data, features, schema, registry, app, apps da AWS)
+├─ infra/              # deploy AWS: ECR, EC2 da app, EC2 do Postgres (ver infra/README.md)
 ├─ data/
 │  ├─ churn.csv.dvc    # ponteiro DVC (o .csv fica no remote)
 │  └─ .gitignore
 ├─ Dockerfile          # imagem com uv (enc. 3)
-├─ compose.yml         # treino, grid, api e painel
+├─ Dockerfile.app      # imagem da AWS: FastAPI + Streamlit via Supervisord
+├─ supervisord.conf    # processos do container da AWS (backend :8000, frontend :8501)
+├─ .env.example        # modelo das variáveis do banco (o .env real é ignorado)
+├─ compose.yml         # treino, grid, api, painel + postgres e app-v2 (AWS local)
 ├─ dvc.yaml            # treino_e_tuning → promover_modelo
 └─ pyproject.toml      # dependências travadas (uv)
 ```
@@ -254,6 +265,80 @@ O painel só conversa com a API (`API_URL`); ele não carrega o modelo.
 ```bash
 uv run python -m churn.registry --export   # gera artifacts/champion/
 docker compose up --build api painel       # API :8000 + painel :8501
+```
+
+---
+
+## Deploy na AWS (duas camadas)
+
+```text
+[Navegador]
+     │ HTTP :8501
+     ▼
+┌── AWS us-east-2 (VPC padrão) ─────────────────────────────────────────────────┐
+│  EC2 churn-app-host (role EC2-ECR-ReadRole)      EC2 churn-db-host            │
+│  ┌── container (imagem do ECR) ──────┐          ┌── container churn_postgres ┐│
+│  │ Supervisord                       │  SQL     │ PostgreSQL 15              ││
+│  │  ├─ Streamlit :8501 app_churn_v2  │  :5432   │ banco churn_db             ││
+│  │  └─ FastAPI   :8000 api_v2 ───────┼─────────►│ tabela customers           ││
+│  │     + @champion em memória        │ IP priv. │ (churn.csv bruto)          ││
+│  └───────────────────────────────────┘          └────────────────────────────┘│
+│                ▲ docker pull                                                  │
+│        Amazon ECR: app-churn:latest                                           │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+* **Camada de aplicação:** um único container roda backend (FastAPI) e frontend (Streamlit),
+  gerenciados pelo Supervisord. A imagem (`Dockerfile.app`) vai para o ECR e a EC2 a baixa
+  com uma **IAM Role** — credenciais temporárias, nenhuma chave gravada em disco.
+* **Camada de dados:** PostgreSQL em Docker numa segunda EC2, com o `churn.csv` bruto na
+  tabela `customers` (`infra/db/init_customers.sql`).
+* As máquinas conversam pelo **IP privado**; a senha do banco entra só em tempo de
+  execução (`--env-file`), nunca no Git nem na imagem.
+
+### app-churn-v1 — consulta de resultados prontos (sem inferência)
+
+* `churn.batch_scoring` aplica o `@champion` a todos os clientes e grava `data/batch_predictions.parquet`
+  (roda dentro do `docker build`).
+* `churn.api_lookup` (FastAPI) só consulta esse arquivo: `GET /results/{customerID}`.
+* `src/churn/app_churn_v1.py` é a tela.
+
+### app-churn-v2 — inferência em tempo real + PostgreSQL
+
+* `churn.api_v2`: `GET /customers/{id}` e `GET /results/{id}` fazem `SELECT` no Postgres e o
+  `@champion` pontua o registro; `POST /predict` faz inferência online para cliente novo
+  (não depende do banco); `GET /health` mostra modelo e banco; `GET /model-info`, a linhagem.
+* `src/churn/app_churn_v2.py`: bloco 1 (consulta no banco) + bloco 2 (nova inferência).
+
+A mesma imagem serve as duas versões (`API_MODULE` / `FRONTEND`, padrão v2).
+
+### Um modelo, do treino à produção
+
+```text
+churn.csv (DVC) → churn.experiments (grid MLflow) → churn.registry (@champion)
+               → churn.registry --export (artifacts/champion/) → docker build → ECR → EC2
+```
+
+* **Contrato de entrada.** O `@champion` é o pipeline completo do treino, e antes de pontuar
+  o registro é checado contra o mesmo `ChurnSchema` (pandera): um cliente vindo do Postgres
+  ou do formulário com categoria desconhecida (`Contract = "Vitalicio"`) é recusado com **422**.
+* **Mesmo ambiente.** A imagem instala as dependências do mesmo `uv.lock` que treinou o modelo.
+* **Linhagem.** `champion_info.json` leva versão, run, métricas, `data_md5` (DVC) e `git_commit`.
+
+### Como publicar
+
+```bash
+uv run python -m churn.experiments && uv run python -m churn.registry
+AWS_PROFILE=churn bash infra/deploy_ecr.sh          # Windows: .\infra\deploy_ecr.ps1 -AwsProfile churn
+```
+
+Passo a passo das duas EC2, role IAM, Security Groups e custos: **[`infra/README.md`](infra/README.md)**.
+
+Teste local das duas camadas, sem AWS:
+
+```bash
+uv run python -m churn.registry --export
+docker compose up --build app-v2        # Postgres + app; painel v2 em http://localhost:8502
 ```
 
 ---

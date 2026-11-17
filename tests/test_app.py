@@ -1,11 +1,8 @@
 """Testes da API FastAPI (churn.app) com um @champion real exportado."""
-import mlflow
 import pytest
 from fastapi.testclient import TestClient
 
 from churn import app as app_module
-from churn import registry
-from churn.model import train
 
 VALID_CUSTOMER = {
     "gender": "Male", "SeniorCitizen": 0, "Partner": "Yes", "Dependents": "No",
@@ -18,27 +15,9 @@ VALID_CUSTOMER = {
 }
 
 
-@pytest.fixture(scope="module")
-def exported(tmp_path_factory):
-    """Treina, registra, promove e exporta um @champion (uma vez por módulo)."""
-    from churn.config import Settings
-    from tests.conftest import make_synthetic
-
-    tmp = tmp_path_factory.mktemp("api")
-    data_path = tmp / "churn.csv"
-    make_synthetic().to_csv(data_path, index=False)
-    mp = pytest.MonkeyPatch()
-    mp.chdir(tmp)
-    mlflow.set_tracking_uri(f"sqlite:///{tmp / 'mlflow.db'}")
-    cfg = Settings(data_path=data_path, artifact_path=tmp / "m.pkl",
-                   champion_dir=tmp / "champion", n_estimators=20)
-    train(cfg)
-    mv = registry.register_model(mlflow.last_active_run().info.run_id)
-    registry.promote_champion(int(mv.version))
-    registry.export_champion(cfg.champion_dir)
-    yield cfg
-    mlflow.set_tracking_uri(None)
-    mp.undo()
+@pytest.fixture()
+def exported(exported_champion):
+    return exported_champion
 
 
 def _client(monkeypatch, **overrides):
@@ -67,8 +46,12 @@ def test_model_info(client, exported):
 
 
 def test_model_info_do_registry(exported, monkeypatch):
+    import mlflow
+
+    mlflow.set_tracking_uri(f"sqlite:///{exported.data_path.parent / 'mlflow.db'}")
     with _client(monkeypatch, model_uri="models:/churn@champion", data_path=exported.data_path) as c:
         assert c.get("/model-info").json()["version"] == 1
+    mlflow.set_tracking_uri(None)
 
 
 def test_predict_novo_cliente(client):
