@@ -5,6 +5,22 @@ O arco é do `train_churn.py` monolítico até um sistema completo de MLOps.
 
 ---
 
+## O dado e o problema
+
+Classificação binária: prever se um cliente vai cancelar o serviço (`Churn = Yes/No`).
+Dataset e modelo base (Random Forest) fixados pela disciplina.
+
+| característica | valor |
+| --- | --- |
+| arquivo | `data/churn.csv` (versionado com DVC, não com Git) |
+| linhas × colunas | 7.043 clientes × 21 colunas |
+| identificador | `customerID` (único; ex.: `7590-VHVEG`) |
+| alvo | `Churn`: 4.752 `No` / 2.291 `Yes` (≈ 32,5 % de churn) |
+| numéricas | `tenure` (0–72 meses), `MonthlyCharges`, `TotalCharges` (texto no CSV; 11 em branco) |
+| categóricas | 16 colunas (contrato, serviços, forma de pagamento etc.) |
+
+---
+
 ## Estrutura
 
 ```
@@ -13,12 +29,15 @@ prj_churn/
 │  ├─ config.py        # Settings (Pydantic) — caminhos, hiperparâmetros
 │  ├─ data.py          # carga, limpeza, validação (pandera)
 │  ├─ schema.py        # ChurnSchema — contrato de dados
+│  ├─ profiling.py     # retrato do dataset (tipos, estatísticas, nulos, alvo)
+│  ├─ schema_demo.py   # quebra proposital do contrato (pandera barrando dado ruim)
 │  ├─ features.py      # transformações puras + encoder sem vazamento
 │  ├─ model.py         # Pipeline sklearn (features → encoder → RF) + MLflow
 │  ├─ evaluate.py      # métricas
 │  ├─ experiments.py   # grid rastreado (MLflow)
 │  ├─ lineage.py       # data_md5() e git_commit()
 │  ├─ registry.py      # Model Registry — @champion, metadados e export
+│  ├─ test_champion.py # consumo de models:/churn@champion (pyfunc)
 │  ├─ predict.py       # inferência em lote via @champion (pyfunc)
 │  ├─ app.py           # API FastAPI servindo o @champion
 │  ├─ dashboard.py     # painel Streamlit que consome a API
@@ -73,6 +92,21 @@ docker compose up treino
 ## Bloco 1 — Data Pipeline (Encontros 4–5)
 
 ### Encontro 4 — Pandera
+
+```bash
+uv run python -m churn.profiling     # retrato do dado (tipos, estatísticas, nulos, alvo)
+uv run python -m churn.schema_demo   # quebra 3 linhas reais de propósito e mostra o pandera barrando
+```
+
+Saída esperada do `schema_demo`:
+
+```text
+customerID duplicado: ['7590-VHVEG']
+        column                                            check failure_case
+        tenure                        less_than_or_equal_to(72)          999
+      Contract isin(['Month-to-month', 'One year', 'Two year'])    Vitalicio
+MonthlyCharges                      greater_than_or_equal_to(0)        -15.0
+```
 
 O `data.py` valida o dataset antes do treino com o `ChurnSchema` (pandera).  
 Dado ruim para o pipeline **cedo e com barulho**, não silenciosamente após a métrica cair.
@@ -136,6 +170,12 @@ Alias @champion → v1
 
 Versões registradas:
   v1  run=abc12345  status=READY  aliases=['champion']
+```
+
+Consumir o campeão como faria qualquer cliente (3 clientes reais da base):
+
+```bash
+uv run python -m churn.test_champion
 ```
 
 Carregar o campeão em código:
@@ -342,6 +382,13 @@ docker compose up --build app-v2        # Postgres + app; painel v2 em http://lo
 ```
 
 ---
+
+## Observações
+
+* **Dependências travadas:** treino, API e imagem da AWS usam o mesmo `uv.lock`.
+* **Testes:** `uv run pytest` cobre dados, features, schema, profiling, registry, API e as apps da AWS (v1 e v2).
+* **IP público das EC2:** muda a cada parada/início. A comunicação entre as máquinas usa o IP privado.
+* **Airflow:** não implementado neste repositório; o ML Pipeline é orquestrado pelo `dvc.yaml`.
 
 ## Próximos encontros
 
