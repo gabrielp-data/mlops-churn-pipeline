@@ -24,7 +24,12 @@ def raw_frame() -> pd.DataFrame:
             "StreamingMovies": ["No", "Yes", "No internet service", "No"],
             "Contract": ["Month-to-month", "Month-to-month", "Two year", "One year"],
             "PaperlessBilling": ["Yes", "Yes", "No", "No"],
-            "PaymentMethod": ["Electronic check", "Mailed check", "Credit card (automatic)", "Bank transfer (automatic)"],
+            "PaymentMethod": [
+                "Electronic check",
+                "Mailed check",
+                "Credit card (automatic)",
+                "Bank transfer (automatic)",
+            ],
             "MonthlyCharges": [55.5, 89.1, 20.0, 45.3],
             "TotalCharges": ["666.0", " ", "680.0", "226.5"],
             "Churn": ["No", "Yes", "No", "Yes"],

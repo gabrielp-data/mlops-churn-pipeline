@@ -1,8 +1,38 @@
 stages:
-  treino:
-    cmd: uv run python -m churn.model
+  treino_e_tuning:
+    cmd: uv run python -m churn.experiments
+    # MLflow tem efeitos externos: uma reprodução cria runs novos.
+    always_changed: true
     deps:
       - data/churn.csv
       - src/churn
+      - pyproject.toml
+      - uv.lock
     outs:
-      - artifacts/churn_model.pkl
+      - artifacts/candidates.json:
+          cache: false
+  promover_modelo:
+    cmd: uv run python -m churn.registry
+    deps:
+      - artifacts/candidates.json
+      - src/churn/registry.py
+    outs:
+      - artifacts/champion.json:
+          cache: false
+  exportar_modelo:
+    cmd: uv run python -m churn.export_champion --promotion artifacts/champion.json
+    deps:
+      - artifacts/champion.json
+      - src/churn/export_champion.py
+    outs:
+      - models/champion:
+          cache: false
+  pontuar_clientes:
+    cmd: uv run python -m churn.predict
+    deps:
+      - data/churn.csv
+      - models/champion
+      - src/churn/predict.py
+    outs:
+      - data/batch_predictions.parquet
+      - data/batch_predictions.parquet.json

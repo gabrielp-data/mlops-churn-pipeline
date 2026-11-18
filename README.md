@@ -1,221 +1,199 @@
-# prj_churn · Curso de MLOps — IESB
+# Churn · do treinamento à aplicação
 
-Projeto-fio-condutor do curso: previsão de **churn** (classificação binária tabular).  
-O arco é do `train_churn.py` monolítico até um sistema completo de MLOps.
+Pipeline de previsão de cancelamento com **MLflow, FastAPI, Streamlit, PostgreSQL, DVC e Docker**.
+O modelo, o encoder e a engenharia de atributos são um único pipeline. A API, o lote
+e a consulta por cliente utilizam o mesmo pacote exportado do Model Registry.
 
----
+A aplicação tem dois modos:
+- **Online:** consulta de clientes no PostgreSQL (ou CSV local) e nova inferência.
+- **Lote:** consulta de um Parquet previamente calculado, sem executar o modelo.
+
+## Demonstração rápida no Windows
+
+Pré-requisitos: Python 3.12 e [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+```powershell
+uv sync --frozen
+.\scripts\demo.ps1
+```
+
+O script baixa uma amostra pública IBM com checksum verificado, treina, promove,
+exporta, calcula o lote e inicia o painel em **http://localhost:8501**.
+A API fica em **http://localhost:8000/docs**. Use Ctrl+C para encerrar os dois serviços.
+Para apenas preparar os artefatos: ` .\scripts\demo.ps1 -TrainOnly `.
+
+**Origem dos dados:** o ponteiro original `data/churn.csv.dvc` foi preservado.
+Seu remote não está configurado no repositório, então `dvc pull` requer a configuração
+do armazenamento original. A demonstração usa separadamente
+[data/telco-public.csv da IBM](https://github.com/IBM/watsonx-ai-samples/blob/e7345a897d3a440e0e8ee465150fe895bd5b29cb/cpd4.5/data/customer_churn/WA_FnUseC_TelcoCustomerChurn.csv),
+com MD5 `3a27ec1ff5c0a90dd61cefa8a13184ab`. Não é uma recuperação da versão original
+`d390bd07b5514a2256a2396993b8b0e3`.
+
+## Executar por etapas
+
+Copie `.env.example` para `.env` e ajuste o caminho dos dados.
+Com a base pública, defina `CHURN_DATA_PATH=data/telco-public.csv`.
+
+```powershell
+uv sync --frozen
+uv run python -m churn.fetch_data
+uv run python -m churn.model
+# Opcional: substitua o treino único pelo grid de 9 combinações.
+uv run python -m churn.experiments
+uv run python -m churn.registry
+uv run python -m churn.export_champion
+uv run python -m churn.predict
+uv run python -m churn.serve
+```
+
+No Linux/macOS, os comandos `uv run` são os mesmos. O demo.ps1 é apenas um atalho Windows.
+
+Para abrir os serviços separadamente:
+```sh
+uv run uvicorn churn.app:app --port 8000
+uv run streamlit run streamlit_app.py
+uv run mlflow ui --backend-store-uri sqlite:///mlflow.db
+```
+
+O MLflow UI usa a mesma URI configurada em CHURN_TRACKING_URI. Os exemplos usam SQLite local.
+
+## Fluxo do modelo
+
+```text
+CSV → validação → split estratificado 60% treino / 20% validação / 20% teste
+    → features + encoder + Random Forest → MLflow
+    → seleção por val_roc_auc → registry @champion
+    → models/champion/ → lote / API / imagem Docker
+```
+
+- Encoder ajustado exclusivamente no treino.
+- Contrato valida categorias, intervalos e colunas; entrada nova não exige Churn.
+- O grid salva todos os modelos e compara ROC-AUC de validação.
+- O conjunto final de teste é avaliado somente para o vencedor do grid.
+- Métricas: accuracy, precision, recall, F1 e ROC-AUC.
+- Cada run salva o hash dos bytes do dado, commit, parâmetros, assinatura e contrato.
+- A promoção usa candidatos da execução atual, evitando runs antigos incompletos.
+- Exportação resolve uma versão imutável; metadados identificam o modelo servido.
+- O limiar de classificação é 0,5. Faixas de risco 0,3 e 0,6 são heurísticas de interface,
+  não decisões de negócio calibradas.
+- Probabilidades do lote e da API são verificadas contra o pipeline carregado.
+
+`models/champion/` contém o modelo MLflow, código, requirements, contrato de features
+e champion_info.json. Mudanças de alias só chegam ao serviço após nova exportação/reinício,
+ou novo build/deploy na AWS.
+
+## Endpoints
+
+| Rota | Resultado |
+|---|---|
+| GET /health | Modelo carregado e disponibilidade do banco configurado |
+| GET /model-info | Versão, run, métricas, parâmetros e linhagem |
+| GET /customers/{id} | Registro do cliente |
+| GET /results/{id} | Registro, previsão e churn observado quando disponível |
+| POST /predict | Previsão de um cliente novo |
+
+Campos de POST /predict: os 19 atributos do Telco, sem customerID ou Churn.
+Consulte o formulário e /docs. TotalCharges deve ser informado; zero não é substituído
+por uma estimativa. Categorias inválidas retornam 422; cliente inexistente, 404;
+falha do banco, 503. A nova inferência permanece disponível sem o banco.
+
+### Lote e aplicação v1
+
+```sh
+uv run python -m churn.predict --input data/telco-public.csv --output data/batch_predictions.parquet
+uv run uvicorn churn.api_lookup:app --port 8001
+```
+
+O lote pode receber um CSV sem alvo e sem ID. A API de consulta exige IDs únicos.
+Ela não oferece POST /predict. Para painel e API v1 juntos, use CHURN_SERVING_MODE=batch
+e CHURN_API_URL apontando para a API do lote.
+
+## PostgreSQL e Docker
+
+Copie `.env.example` para `.env`, escolha POSTGRES_PASSWORD e configure:
+`CHURN_DATABASE_URL=postgresql+psycopg://churn:SENHA_URL_ENCODED@db:5432/churn`.
+
+Depois do treino, promoção e exportação locais:
+
+```sh
+docker compose --profile database up -d --wait db
+docker compose build app
+docker compose run --rm app python -m churn.db --input /app/data/telco-public.csv
+docker compose up -d app
+```
+
+A importação cria a tabela e insere em uma transação; não sobrescreve IDs existentes.
+Para CSV local, deixe CHURN_DATABASE_URL ausente e ajuste CHURN_DATA_PATH. O Compose
+aceita o caminho em `data/` definido no .env e monta a pasta somente para leitura.
+
+A imagem serving roda FastAPI e Streamlit juntos, como a referência. Encerra ambos
+se um processo falhar e tem health check dos dois. Modelos são exportados antes do build;
+o banco MLflow não vai dentro da imagem.
+
+```sh
+# Variante de consulta em lote, nas portas 8001 e 8502:
+docker compose --profile batch up -d lookup
+# Treino isolado, sem exigir exportação prévia:
+docker compose --profile training run --rm treino
+```
+
+O treino em container mantém seu registry em .state/mlflow.db e os artefatos em mlruns/.
+Para promover e exportar esse treino, use o mesmo serviço:
+```sh
+docker compose --profile training run --rm treino python -m churn.registry
+docker compose --profile training run --rm treino python -m churn.export_champion
+```
+
+Deploy ECR + EC2 da aplicação + EC2 do PostgreSQL: [infra/README.md](infra/README.md).
+Os scripts não provisionam recursos AWS automaticamente.
+
+## DVC
+
+Com o CSV original disponível em data/churn.csv e uv no PATH:
+```sh
+uv run dvc repro
+```
+
+As dependências conectam tuning → promoção → exportação → lote.
+A etapa de treino é sempre executada, pois cria estado no MLflow externo ao cache DVC.
+Não use a amostra pública como se fosse o dado do ponteiro original. Para adotá-la como
+nova versão oficial, atualize explicitamente o caminho/ponteiro e configure um remote DVC.
+
+## Testes e CI
+
+```sh
+uv run ruff check src tests streamlit_app.py
+uv run pytest -q
+```
+
+A suíte inclui validação, API com modelo real, painel Streamlit, falha de banco,
+importação transacional e ciclo completo com SQLite/MLflow, registry, exportação e lote.
+O CI executa os testes em Python 3.12 no Linux. SQLite valida a integração de dados
+nos testes; PostgreSQL e containers precisam de verificação no ambiente de implantação.
+
+Airflow, retreino automático, monitoramento de drift, autenticação e implantação contínua
+não fazem parte desta versão.
 
 ## Estrutura
 
-```
-prj_churn/
-├─ src/churn/
-│  ├─ config.py        # Settings (Pydantic) — caminhos, hiperparâmetros
-│  ├─ data.py          # carga, limpeza, validação (pandera)
-│  ├─ schema.py        # ChurnSchema — contrato de dados
-│  ├─ features.py      # transformações puras + encoder sem vazamento
-│  ├─ model.py         # treino + MLflow tracking + signature
-│  ├─ evaluate.py      # métricas
-│  ├─ experiments.py   # grid rastreado (MLflow)
-│  ├─ lineage.py       # data_md5() e git_commit()
-│  ├─ registry.py      # Model Registry — register, aliases @champion/@challenger
-│  ├─ predict.py       # inferência em lote via @champion (pyfunc)
-│  └─ app.py           # API REST FastAPI (GET /health, POST /predict)
-├─ tests/              # pytest (data, features, schema, app)
-├─ data/
-│  ├─ churn.csv.dvc    # ponteiro DVC (o .csv fica no remote)
-│  └─ .gitignore
-├─ Dockerfile          # imagem com uv (enc. 3)
-├─ compose.yml         # docker compose (enc. 3)
-├─ dvc.yaml            # pipeline reproduzível (enc. 5)
-└─ pyproject.toml      # dependências travadas (uv)
+```text
+src/churn/
+  data.py, schema.py, features.py  contrato e transformações
+  model.py, experiments.py         treino e avaliação
+  registry.py, export_champion.py  seleção e empacotamento
+  inference.py, predict.py         scoring compartilhado
+  app.py, api_lookup.py            APIs online e de lote
+  db.py                           clientes e importação
+  serve.py                        FastAPI + Streamlit
+  fetch_data.py                   amostra pública verificada
+streamlit_app.py                   painel
+tests/                            testes unitários e de integração
+infra/                            ECR/EC2/PostgreSQL
+scripts/demo.ps1                  demonstração local
+Dockerfile, compose.yml            execução em containers
+dvc.yaml                          reprodução do fluxo
 ```
 
----
-
-## Bloco 0 — Fundação (Encontros 1–3)
-
-### Rodando localmente
-
-```bash
-uv sync                              # cria o ambiente a partir do pyproject
-uv run python -m churn.model         # treina e imprime métricas
-uv run pytest                        # testa
-```
-
-### Rodando no container (Docker)
-
-```bash
-docker build -t churn:0.1 .
-docker run -v $(pwd)/data:/app/data -v $(pwd)/artifacts:/app/artifacts churn:0.1
-```
-
-Ou com compose:
-
-```bash
-docker compose up treino
-```
-
----
-
-## Bloco 1 — Data Pipeline (Encontros 4–5)
-
-### Encontro 4 — Pandera
-
-O `data.py` valida o dataset antes do treino com o `ChurnSchema` (pandera).  
-Dado ruim para o pipeline **cedo e com barulho**, não silenciosamente após a métrica cair.
-
-```python
-# para forçar falha e ver o contrato em ação:
-from churn.schema import ChurnSchema
-ChurnSchema.validate(df_ruim, lazy=True)  # SchemaErrors com todas as violações
-```
-
-### Encontro 5 — DVC
-
-O `churn.csv` não vai para o Git — só o ponteiro `churn.csv.dvc` vai.  
-Os bytes ficam em um remote (local ou S3).
-
-```bash
-dvc pull           # baixa o dado do remote
-dvc repro          # re-executa só o que mudou (dado ou código)
-dvc push           # sobe a nova versão do dado
-```
-
----
-
-## Bloco 2 — ML Pipeline (Encontros 6–8)
-
-### Encontro 6 — MLflow Tracking
-
-```bash
-uv run python -m churn.model          # um run rastreado
-uv run python -m churn.experiments    # grid: 9 combinações (n_estimators × max_depth)
-uv run mlflow ui                      # UI em localhost:5000
-```
-
-Achar o melhor run por código:
-
-```python
-import mlflow
-runs = mlflow.search_runs(experiment_names=["churn"], order_by=["metrics.roc_auc DESC"])
-print(runs.iloc[0][["params.n_estimators", "params.max_depth", "metrics.roc_auc"]])
-```
-
-> **Dica:** use `--backend-store-uri sqlite:///mlflow.db` para um backend persistente:
-> ```bash
-> MLFLOW_TRACKING_URI=sqlite:///mlflow.db uv run python -m churn.model
-> MLFLOW_TRACKING_URI=sqlite:///mlflow.db uv run mlflow ui
-> ```
-
-### Encontro 7 — Model Registry
-
-Registra a melhor run e promove o alias `@champion`:
-
-```bash
-uv run python -m churn.registry
-```
-
-Saída esperada:
-```
-Melhor run: abc12345  roc_auc=0.8195
-Modelo registrado → versão 1
-Alias @champion → v1
-
-Versões registradas:
-  v1  run=abc12345  status=READY  aliases=['champion']
-```
-
-Carregar o campeão em código:
-
-```python
-from churn.registry import load_champion
-model = load_champion()            # pyfunc — agnóstico de framework
-preds = model.predict(features_df)
-```
-
-### Encontro 8 — Empacotamento (MLflow Models)
-
-O `model.py` agora registra **assinatura** e **exemplo de entrada** junto ao artefato:
-
-```python
-signature = infer_signature(x_train_enc, model.predict(x_train_enc))
-mlflow.sklearn.log_model(model, artifact_path="model",
-                         signature=signature, input_example=x_train_enc.iloc[:5])
-```
-
-Inferência em lote com o `@champion`:
-
-```bash
-uv run python -m churn.predict --input data/churn.csv --output predictions.csv
-```
-
----
-
-## O que mudou em relação ao `train_churn.py`
-
-| Script monolítico | Projeto modular |
-|---|---|
-| caminho hardcoded `C:/Users/ana/...` | `config.py` (Pydantic, sobrescrevível por env) |
-| `fillna(2200)` mágico | `TotalCharges` em branco → `0.0` (cliente novo) |
-| normalização por números mágicos | removida — Random Forest não precisa de escala |
-| `LabelEncoder` no dataset inteiro (vazamento) | `CategoricalEncoder` com `fit` só no treino |
-| sem `random_state` (acurácia instável) | semente fixa em split e modelo |
-| só `accuracy` | 5 métricas: accuracy, precision, recall, f1, roc_auc |
-| sem validação de dados | `ChurnSchema` (pandera) — falha cedo e com mensagem |
-| dataset solto no disco | `churn.csv.dvc` — versionado pelo DVC |
-| `print(accuracy)` e esquece | MLflow registra params, métricas e artefatos |
-| modelo em arquivo pkl sem rastreamento | Model Registry com aliases `@champion`/`@challenger` |
-| inferência acoplada ao código de treino | `predict.py` carrega `@champion` via pyfunc (agnóstico) |
-
-## Bloco 3 — Serving (Encontro 12)
-
-### FastAPI
-
-```bash
-# 1. treine o modelo primeiro (gera artifacts/churn_model.pkl)
-uv run python -m churn.model
-
-# 2. suba a API
-uv run uvicorn churn.app:app --reload --port 8000
-```
-
-- **Docs interativas:** http://localhost:8000/docs
-- **Health check:** http://localhost:8000/health
-
-Exemplo de chamada:
-
-```bash
-curl -s -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{
-    "gender": "Male", "SeniorCitizen": 0, "Partner": "Yes",
-    "Dependents": "No", "tenure": 12, "PhoneService": "Yes",
-    "MultipleLines": "No", "InternetService": "DSL",
-    "OnlineSecurity": "No", "OnlineBackup": "No",
-    "DeviceProtection": "No", "TechSupport": "No",
-    "StreamingTV": "No", "StreamingMovies": "No",
-    "Contract": "Month-to-month", "PaperlessBilling": "Yes",
-    "PaymentMethod": "Electronic check",
-    "MonthlyCharges": 55.5, "TotalCharges": 666.0
-  }'
-```
-
-Resposta:
-```json
-{"churn": true, "churn_probability": 0.72, "label": "Yes"}
-```
-
-Ou com Docker Compose:
-
-```bash
-docker compose up api
-```
-
----
-
-## Próximos encontros
-
-- **Enc. 9–11** — Orquestração com Airflow.
-- **Enc. 12–14** — Serving com FastAPI + CI/CD.
-- **Enc. 15** — Monitoramento com Evidently.
+O escopo de aplicação segue a referência
+[caiorj2004/mlops-churn-project](https://github.com/caiorj2004/mlops-churn-project),
+com implementação integrada ao pacote e aos testes deste repositório.

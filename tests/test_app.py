@@ -1,80 +1,82 @@
-"""Testes da API FastAPI (churn.app)."""
-from unittest.mock import MagicMock, patch
+"""Contrato HTTP com pipeline real; mocks só para falhas externas."""
 
-import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 
-from churn.app import app
-
-VALID_CUSTOMER = {
-    "gender": "Male",
-    "SeniorCitizen": 0,
-    "Partner": "Yes",
-    "Dependents": "No",
-    "tenure": 12,
-    "PhoneService": "Yes",
-    "MultipleLines": "No",
-    "InternetService": "DSL",
-    "OnlineSecurity": "No",
-    "OnlineBackup": "No",
-    "DeviceProtection": "No",
-    "TechSupport": "No",
-    "StreamingTV": "No",
-    "StreamingMovies": "No",
-    "Contract": "Month-to-month",
-    "PaperlessBilling": "Yes",
-    "PaymentMethod": "Electronic check",
-    "MonthlyCharges": 55.5,
-    "TotalCharges": 666.0,
-}
+from churn.app import create_app
+from churn.config import Settings
+from churn.inference import ChampionModel
+from churn.model import build_model
 
 
-def _fake_pipeline() -> dict:
-    encoder = MagicMock()
-    encoder.transform.side_effect = lambda df: df.select_dtypes(include="number")
-    model = MagicMock()
-    model.predict_proba.return_value = np.array([[0.3, 0.7]])
-    return {"encoder": encoder, "model": model}
+@pytest.fixture
+def client(raw_frame, tmp_path):
+    cfg = Settings(_env_file=None, data_path=tmp_path / "customers.csv", n_estimators=5)
+    raw_frame.to_csv(cfg.data_path, index=False)
+    champion = ChampionModel.__new__(ChampionModel)
+    champion.model = build_model(cfg).fit(
+        raw_frame, (raw_frame.Churn == "Yes").astype(int)
+    )
+    champion.info = {"version": "7", "run_id": "test-run", "model_name": "churn"}
+    with TestClient(create_app(cfg, model_factory=lambda path: champion)) as client:
+        yield client
 
 
-@pytest.fixture()
-def client():
-    """TestClient com carregamento de artefato mockado."""
-    with patch("churn.app._load_artifact", return_value=_fake_pipeline()):
-        with TestClient(app, raise_server_exceptions=True) as c:
-            yield c
+def payload(raw_frame):
+    return raw_frame.drop(columns=["customerID", "Churn"]).iloc[0].to_dict()
 
 
-def test_health_ok(client):
-    resp = client.get("/health")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "ok"
-    assert resp.json()["model_loaded"] is True
+def test_health_and_prediction(client, raw_frame):
+    assert client.get("/health").json()["model_loaded"] is True
+    response = client.post("/predict", json=payload(raw_frame))
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert 0 <= result["churn_probability"] <= 1
+    assert result["model_version"] == "7"
+    assert result["label"] == ("Yes" if result["churn"] else "No")
 
 
-def test_predict_retorna_estrutura(client):
-    resp = client.post("/predict", json=VALID_CUSTOMER)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "churn" in body
-    assert "churn_probability" in body
-    assert "label" in body
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("tenure", -1),
+        ("tenure", 73),
+        ("SeniorCitizen", 2),
+        ("MonthlyCharges", -1),
+        ("TotalCharges", -10),
+        ("Contract", "Vitalício"),
+    ],
+)
+def test_invalid_payload(client, raw_frame, field, value):
+    data = payload(raw_frame)
+    data[field] = value
+    assert client.post("/predict", json=data).status_code == 422
 
 
-def test_predict_probabilidade_no_intervalo(client):
-    resp = client.post("/predict", json=VALID_CUSTOMER)
-    prob = resp.json()["churn_probability"]
-    assert 0.0 <= prob <= 1.0
+def test_missing_field(client, raw_frame):
+    data = payload(raw_frame)
+    data.pop("tenure")
+    assert client.post("/predict", json=data).status_code == 422
 
 
-def test_predict_label_consistente(client):
-    resp = client.post("/predict", json=VALID_CUSTOMER)
-    body = resp.json()
-    assert body["label"] == ("Yes" if body["churn"] else "No")
+def test_lookup_and_online_match(client, raw_frame):
+    online = client.post("/predict", json=payload(raw_frame)).json()
+    lookup = client.get("/results/A1")
+    assert lookup.status_code == 200
+    assert lookup.json()["churn_probability"] == online["churn_probability"]
+    assert lookup.json()["actual_churn"] == "No"
+    assert client.get("/customers/not-found").status_code == 404
 
 
-def test_predict_campo_faltando(client):
-    incompleto = {k: v for k, v in VALID_CUSTOMER.items() if k != "tenure"}
-    resp = client.post("/predict", json=incompleto)
-    assert resp.status_code == 422
+def test_database_outage_does_not_stop_prediction(client, raw_frame, monkeypatch):
+    def unavailable(*args):
+        raise OperationalError("query", {}, Exception("private connection details"))
+
+    monkeypatch.setattr("churn.db.check_database", unavailable)
+    monkeypatch.setattr("churn.db.fetch_customer", unavailable)
+    assert client.get("/health").status_code == 503
+    response = client.get("/results/A1")
+    assert response.status_code == 503
+    assert "private" not in response.text
+    assert client.post("/predict", json=payload(raw_frame)).status_code == 200
