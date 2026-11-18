@@ -1,216 +1,105 @@
-"""Painel de consulta e nova inferência; toda previsão vem da API."""
-
 import os
-from urllib.parse import quote
-
 import requests
 import streamlit as st
 
-from churn.config import settings
+API_URL = os.getenv("API_URL", "http://localhost:8000")
 
-st.set_page_config(page_title="Churn | Visão de clientes", page_icon="◉", layout="wide")
-API_URL = settings.api_url.rstrip("/")
-BATCH_MODE = os.environ.get("CHURN_SERVING_MODE", "online") == "batch"
-st.markdown(
-    """
-<style>
-.block-container { max-width: 1150px; padding-top: 2.5rem; }
-[data-testid="stMetric"] { background: #f0f5f4; border-radius: 12px; padding: 16px; }
-</style>
-""",
-    unsafe_allow_html=True,
+st.set_page_config(page_title="Painel MLOps - Predição de Churn", layout="wide")
+
+st.title("📊 Painel de Predição de Churn - MLOps")
+st.markdown("Consulte previsões em tempo real e inspecione a governança do modelo **@champion**.")
+
+st.sidebar.header("Parâmetros de Entrada")
+customer_id = st.sidebar.text_input("Código do Cliente (customer_id)", value="7015-DBER")
+
+usar_manual = st.sidebar.checkbox("Simular outros valores numéricos para este cliente", value=False)
+
+tenure, monthly, total = None, None, None
+if usar_manual:
+    tenure = st.sidebar.number_input("Meses de Contrato (tenure)", min_value=1, max_value=120, value=1)
+    monthly = st.sidebar.number_input("Cobrança Mensal (MonthlyCharges)", min_value=0.0, value=29.85, step=5.0)
+    total = st.sidebar.number_input("Cobrança Total (TotalCharges)", min_value=0.0, value=29.85, step=10.0)
+
+opcoes = st.sidebar.multiselect(
+    "O que você deseja avaliar?",
+    ["Predição de Churn", "Métricas do Champion", "Hiperparâmetros", "Metadados Gerais"],
+    default=["Predição de Churn", "Métricas do Champion"]
 )
-st.caption("CUSTOMER INTELLIGENCE  /  RETENÇÃO")
-st.title("Cada cliente conta.")
-st.write("Consulte sua base e acompanhe a probabilidade de cancelamento.")
 
+btn_consultar = st.sidebar.button("Consultar Modelo", type="primary")
 
-def api_request(method, path, payload=None):
-    try:
-        response = requests.request(
-            method, f"{API_URL}{path}", json=payload, timeout=15
-        )
-    except requests.RequestException:
-        st.error("Não foi possível conectar ao serviço. Tente novamente em instantes.")
-        return None
-    if response.status_code == 404:
-        st.warning("Cliente não encontrado. Confira o código informado.")
-        return None
-    if response.status_code == 422:
-        st.warning("Confira os dados: há um valor fora das opções aceitas.")
-        return None
-    if not response.ok:
-        st.error("Serviço temporariamente indisponível.")
-        return None
-    try:
-        return response.json()
-    except ValueError:
-        st.error("O serviço retornou uma resposta inválida.")
-        return None
+if btn_consultar:
+    if not customer_id.strip():
+        st.error("Por favor, informe um código de cliente válido.")
+    else:
+        with st.spinner("Consultando modelo @champion na API..."):
+            try:
+                if usar_manual:
+                    payload = {
+                        "customer_id": customer_id.strip(),
+                        "tenure": int(tenure),
+                        "monthly_charges": float(monthly),
+                        "total_charges": float(total)
+                    }
+                    response = requests.post(f"{API_URL}/predict", json=payload)
+                else:
+                    response = requests.get(f"{API_URL}/predict/{customer_id.strip()}")
 
+                if response.status_code == 200:
+                    data = response.json()
+                    champion = data.get("champion_model_info", {})
 
-def show_result(result):
-    cols = st.columns(3)
-    cols[0].metric(
-        "Probabilidade de cancelamento", f"{result['churn_probability']:.1%}"
-    )
-    cols[1].metric("Faixa de risco", result["risk_level"])
-    cols[2].metric(
-        "Previsão", "Cancelamento" if result["churn_prediction"] else "Permanência"
-    )
-    st.caption(
-        "Faixas: baixo < 30% · médio de 30% a 60% · alto ≥ 60%. Limite de classificação: 50%."
-    )
-    if result.get("actual_churn") is not None:
-        st.write(
-            "Resultado observado:",
-            "Cancelou" if result["actual_churn"] == "Yes" else "Permaneceu",
-        )
-    st.caption(f"Versão do modelo: {result['model_version']}")
-    if "customer" in result:
-        with st.expander("Dados do cliente"):
-            st.json(result["customer"])
+                    st.success(f"Dados processados com sucesso para o cliente: **{customer_id}**")
+                    col1, col2 = st.columns(2)
 
+                    if "Predição de Churn" in opcoes:
+                        with col1:
+                            st.subheader("Resultado da Predição")
+                            label = data.get("label", "Desconhecido")
+                            pred = data.get("churn_prediction", 0)
 
-with st.sidebar:
-    st.subheader("Sobre o modelo")
-    if st.button("Consultar versão"):
-        info = api_request("GET", "/model-info")
-        if info:
-            st.write(f"Versão {info['version']}")
-            if "test_roc_auc" in info.get("metrics", {}):
-                st.metric("ROC-AUC no teste", f"{info['metrics']['test_roc_auc']:.3f}")
-            st.caption(f"Atualizado em {info['exported_at'][:10]}")
-    st.divider()
-    st.write(
-        "A previsão apoia a priorização de contatos. O resultado observado pode ser diferente."
-    )
+                            if pred == 1:
+                                st.error(f"Classificação: **{label} (1)** - Alta probabilidade de cancelamento.")
+                            else:
+                                st.success(f"Classificação: **{label} (0)** - Baixo risco de cancelamento.")
+                            
+                            st.caption(f"Origem dos dados: `{data.get('customer_source', 'N/A')}` · Churn real na base: `{data.get('actual_churn', 'N/A')}`")
 
-tabs = st.tabs(
-    ["Consultar cliente"] if BATCH_MODE else ["Consultar cliente", "Nova previsão"]
-)
-with tabs[0]:
-    st.subheader("Encontre um cliente")
-    with st.form("lookup"):
-        customer_id = st.text_input("Código do cliente", placeholder="Ex.: 7590-VHVEG")
-        lookup = st.form_submit_button("Consultar", type="primary")
-    if lookup:
-        if not customer_id.strip():
-            st.warning("Informe o código do cliente.")
-        else:
-            result = api_request(
-                "GET", f"/results/{quote(customer_id.strip(), safe='')}"
-            )
-            if result:
-                show_result(result)
+                    if "Métricas do Champion" in opcoes:
+                        with col2:
+                            st.subheader("Métricas do Modelo Ativo")
+                            acc = champion.get("test_accuracy")
+                            st.metric(label="Acurácia de Teste (@champion)", value=f"{acc * 100:.2f}%" if acc is not None else "N/A")
+                            st.info(f"Versão no Registry: **v{champion.get('version', 'N/A')}** | Tag: `{champion.get('alias', '@champion')}`")
 
-if not BATCH_MODE:
-    with tabs[1]:
-        st.subheader("Conheça o risco de um novo perfil")
-        st.write("Preencha os dados atuais para calcular uma previsão.")
-        with st.form("prediction"):
-            left, middle, right = st.columns(3)
-            with left:
-                st.markdown("**Perfil e contrato**")
-                gender = st.selectbox(
-                    "Gênero",
-                    ["Female", "Male"],
-                    format_func=lambda x: {"Female": "Feminino", "Male": "Masculino"}[
-                        x
-                    ],
-                )
-                senior = st.selectbox(
-                    "Pessoa idosa", [0, 1], format_func=lambda x: "Sim" if x else "Não"
-                )
-                partner = st.checkbox("Possui companheiro(a)")
-                dependents = st.checkbox("Possui dependentes")
-                tenure = st.number_input(
-                    "Tempo como cliente (meses)", min_value=0, max_value=72, value=12
-                )
-                contract = st.selectbox(
-                    "Contrato",
-                    ["Month-to-month", "One year", "Two year"],
-                    format_func=lambda x: {
-                        "Month-to-month": "Mensal",
-                        "One year": "Um ano",
-                        "Two year": "Dois anos",
-                    }[x],
-                )
-            with middle:
-                st.markdown("**Serviços contratados**")
-                phone = st.checkbox("Telefonia", value=True)
-                multiple = st.checkbox("Múltiplas linhas")
-                internet = st.selectbox(
-                    "Internet",
-                    ["DSL", "Fiber optic", "No"],
-                    format_func=lambda x: {
-                        "DSL": "DSL",
-                        "Fiber optic": "Fibra óptica",
-                        "No": "Sem internet",
-                    }[x],
-                )
-                security = st.checkbox("Segurança online")
-                backup = st.checkbox("Backup online")
-                protection = st.checkbox("Proteção de dispositivos")
-                support = st.checkbox("Suporte técnico")
-                tv = st.checkbox("Streaming de TV")
-                movies = st.checkbox("Streaming de filmes")
-            with right:
-                st.markdown("**Cobrança**")
-                monthly = st.number_input(
-                    "Mensalidade", min_value=0.0, value=75.0, step=5.0
-                )
-                total = st.number_input(
-                    "Total já cobrado", min_value=0.0, value=900.0, step=10.0
-                )
-                paperless = st.checkbox("Fatura digital", value=True)
-                payment = st.selectbox(
-                    "Pagamento",
-                    [
-                        "Electronic check",
-                        "Mailed check",
-                        "Bank transfer (automatic)",
-                        "Credit card (automatic)",
-                    ],
-                    format_func=lambda x: {
-                        "Electronic check": "Cheque eletrônico",
-                        "Mailed check": "Cheque por correio",
-                        "Bank transfer (automatic)": "Débito automático",
-                        "Credit card (automatic)": "Cartão automático",
-                    }[x],
-                )
-            submitted = st.form_submit_button("Calcular previsão", type="primary")
-        if submitted:
+                    if "Hiperparâmetros" in opcoes:
+                        st.subheader("Hiperparâmetros de Treino")
+                        params = champion.get("hyperparameters", {})
+                        if params:
+                            st.json(params)
+                        else:
+                            st.write("Nenhum hiperparâmetro retornado.")
 
-            def yes_no(value):
-                return "Yes" if value else "No"
+                    if "Metadados Gerais" in opcoes:
+                        st.subheader("Linhagem e Rastreamento")
+                        st.write(f"- **Nome do Modelo:** `{champion.get('model_name', 'churn-model')}`")
+                        st.write(f"- **MLflow Run ID:** `{champion.get('run_id', 'N/A')}`")
+                        st.write(f"- **Status de Produção:** `{champion.get('status', 'N/A')}`")
 
-            payload = {
-                "gender": gender,
-                "SeniorCitizen": senior,
-                "Partner": yes_no(partner),
-                "Dependents": yes_no(dependents),
-                "tenure": tenure,
-                "PhoneService": yes_no(phone),
-                "MultipleLines": yes_no(multiple) if phone else "No phone service",
-                "InternetService": internet,
-                "Contract": contract,
-                "PaperlessBilling": yes_no(paperless),
-                "PaymentMethod": payment,
-                "MonthlyCharges": monthly,
-                "TotalCharges": total,
-            }
-            for field, selected in {
-                "OnlineSecurity": security,
-                "OnlineBackup": backup,
-                "DeviceProtection": protection,
-                "TechSupport": support,
-                "StreamingTV": tv,
-                "StreamingMovies": movies,
-            }.items():
-                payload[field] = (
-                    yes_no(selected) if internet != "No" else "No internet service"
-                )
-            result = api_request("POST", "/predict", payload)
-            if result:
-                show_result(result)
+                    st.divider()
+                    st.subheader("📖 Explicação da Saída")
+                    st.markdown("""
+                    - **Churn (Sim / 1):** Padrões contratuais e financeiros indicam alto risco de cancelamento.
+                    - **No Churn (Não / 0):** O perfil do cliente indica retenção e estabilidade.
+                    - **Acurácia de Teste:** Eficácia medida em conjunto de teste não utilizado durante o treinamento.
+                    """)
+
+                elif response.status_code == 404:
+                    st.warning(f"Cliente '{customer_id}' não encontrado na base. Use um customerID existente (ex.: 7015-DBER).")
+                elif response.status_code == 503:
+                    st.error("O modelo @champion não está carregado na API.")
+                else:
+                    st.error(f"Erro na API ({response.status_code}): {response.text}")
+
+            except requests.exceptions.ConnectionError:
+                st.error(f"Não foi possível conectar à API em `{API_URL}`. Verifique se o serviço está rodando.")

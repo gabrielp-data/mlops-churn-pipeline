@@ -1,20 +1,17 @@
+# Ambientes e caches Python
 .venv/
+venv/
 __pycache__/
 *.pyc
-artifacts/
-.env
+
+# Artefatos gerados localmente (recriados pelo pipeline / Docker build)
 mlruns/
-# dados: versionados pelo DVC
-/data/*.csv
-.pytest_cache/
-*.egg-info/
-dist/
+mlflow.db
 models/
-mlflow.db*
-/data/*.parquet
-/data/*.json
-.ruff_cache/
-.uv-cache/
-.tools/
-.test-tmp*/
-.state/
+data/batch_predictions.parquet
+
+# Credenciais e segredos - NUNCA versionar
+.env
+.aws/
+*.pem
+credentials
