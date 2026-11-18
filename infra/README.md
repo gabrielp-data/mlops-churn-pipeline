@@ -71,7 +71,7 @@ Se o banco estiver fora do ar, as rotas de consulta respondem `503` e o `/predic
 
 ### 4.2 Imagem da aplicação (máquina local, Windows)
 ```powershell
-python -m dvc pull                 # garante data/raw/churn.csv (usado pelo lote da v1 no build)
+# data/raw/churn.csv precisa existir (usado pelo lote da v1 no build); veja a seção 6 do README
 .\infra\deploy_ecr.ps1 -AwsProfile churn   # exporta o @champion, faz o build e o push para o ECR
 ```
 Espere aparecer `Publicacao concluida com sucesso!` antes do passo 4.3: se a EC2 baixar a imagem antes do push terminar, ela recebe a versão anterior (confira o `Digest:` do pull).

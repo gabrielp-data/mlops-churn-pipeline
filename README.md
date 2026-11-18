@@ -60,7 +60,9 @@ Classificação binária: prever se um cliente vai cancelar o serviço (`Churn =
 * **Camada de dados:** PostgreSQL em Docker numa segunda EC2. O `churn.csv` bruto foi carregado na tabela `customers` (`CSV → postgres`).
 * As duas máquinas conversam pelo **IP privado** da VPC; a senha do banco entra no container em tempo de execução (`--env-file`) e nunca vai para o Git nem para a imagem.
 
-Evidências (painel em produção na AWS):
+> **Status do deploy:** a arquitetura acima e os scripts de `infra/` estão prontos, mas este repositório **ainda não foi implantado na AWS**. As imagens abaixo vêm do projeto de referência (`caiorj2004/mlops-churn-project`) e mostram o resultado esperado.
+
+Resultado esperado (painel em produção na AWS, projeto de referência):
 
 | Bloco 1 — consulta por código no PostgreSQL | Bloco 2 — nova inferência em tempo real |
 | --- | --- |
@@ -274,7 +276,9 @@ Pré-requisitos: Python 3.11+, Git, DVC e Docker. Os comandos abaixo são do **P
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python -m dvc pull                       # baixa o churn.csv do remote DVC (veja a seção 7)
+# O DVC deste repositório ainda não tem remote: baixe a base pública (mesmos 7.043 clientes)
+New-Item -ItemType Directory -Force data/raw | Out-Null
+Invoke-WebRequest -OutFile data/raw/churn.csv "https://raw.githubusercontent.com/IBM/watsonx-ai-samples/e7345a897d3a440e0e8ee465150fe895bd5b29cb/cpd4.5/data/customer_churn/WA_FnUseC_TelcoCustomerChurn.csv"
 ```
 
 **Pipeline modular dentro do container (Encontro 3)**
@@ -322,4 +326,6 @@ streamlit run app_churn_v2.py
 * **Dependências parcialmente travadas:** o container de treino (`uv.lock`) e as bibliotecas do modelo na imagem da AWS (`models/champion/requirements.txt`) têm versões exatas; o `requirements.txt` do ambiente local e o `requirements-app.txt` declaram versões mínimas (`>=`).
 * **Testes:** a validação de dados tem um script de quebra proposital (`test_schema.py`), mas o projeto ainda não tem uma suíte `pytest`.
 * **Etapas do plano não implementadas neste repositório:** orquestração com Airflow, CI/CD com GitHub Actions e monitoramento de drift com Evidently (previstos na `grade-mlops-60h.md`).
+* **MLflow recente + uv:** `src/__init__.py` define `MLFLOW_UV_AUTO_DETECT=false`. Sem isso, com MLflow 3.x e o `uv` instalado, o autolog tenta exportar as dependências pelo `uv.lock` e falha em silêncio, sem salvar o modelo.
+* **Resultados do grid:** a tabela da seção 3 é do projeto de referência. Com outras versões das bibliotecas o campeão pode mudar (ex.: com scikit-learn 1.9 e MLflow 3.18, `rf-n100-d8` com 0,7999).
 * **IP público das EC2:** muda a cada parada/início das instâncias. A comunicação entre as máquinas usa o IP privado e não é afetada.
