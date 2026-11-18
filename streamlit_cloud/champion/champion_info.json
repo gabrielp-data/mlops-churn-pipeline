@@ -1,0 +1,13 @@
+{
+  "model_name": "churn-model",
+  "alias": "@champion",
+  "version": 1,
+  "run_id": "ad80f992061a43b48663a5fe53cc6dc6",
+  "run_name": "rf-n500-d8",
+  "test_accuracy": 0.801277501774308,
+  "n_estimators": "500",
+  "max_depth": "8",
+  "data_md5": "d390bd07b5514a2256a2396993b8b0e3",
+  "git_commit": "6bfa230",
+  "exported_at": "2026-11-18 17:05:24 UTC"
+}
