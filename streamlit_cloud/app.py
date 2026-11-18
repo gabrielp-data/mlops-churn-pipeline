@@ -216,4 +216,7 @@ if db_ok:
     with get_engine().connect() as conn:
         hist = pd.read_sql(text("SELECT created_at, churn_prediction, churn_probability, risk_level, "
                                 "model_version FROM predictions ORDER BY created_at DESC LIMIT 20"), conn)
-    st.dataframe(hist, width="stretch") if len(hist) else st.info("Nenhuma inferência gravada ainda.")
+    if len(hist):
+        st.dataframe(hist, width="stretch")
+    else:
+        st.info("Nenhuma inferência gravada ainda.")

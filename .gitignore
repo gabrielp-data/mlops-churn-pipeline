@@ -18,3 +18,14 @@ credentials
 
 # Segredos locais do Streamlit (a URL do banco vai em Secrets no Streamlit Cloud)
 .streamlit/secrets.toml
+
+# Testes e ferramentas locais
+.pytest_cache/
+.ruff_cache/
+.tools/
+.test-tmp*/
+.state/
+artifacts/
+/data/*.csv
+/data/*.parquet
+/data/*.json
