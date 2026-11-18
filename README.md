@@ -319,6 +319,16 @@ streamlit run app_churn_v2.py
 
 **Deploy na AWS:** veja [`infra/README.md`](infra/README.md).
 
+**Deploy gratuito no Streamlit Community Cloud (app + PostgreSQL separados)**
+
+O Streamlit Cloud roda um processo só, então a pasta `streamlit_cloud/` traz um painel que aplica o `@champion` direto (mesmo contrato de features do treino) e usa um PostgreSQL gerenciado em outro servidor (ex.: Neon, grátis).
+
+1. Crie um projeto no [Neon](https://neon.tech) e copie a *connection string* (`postgresql://...?sslmode=require`).
+2. Em [share.streamlit.io](https://share.streamlit.io), entre com o GitHub e clique em **Create app** → repositório `mlops-churn-pipeline`, branch padrão, arquivo `streamlit_cloud/app.py`.
+3. Em **Advanced settings → Secrets**, cole `DB_URL = "postgresql://..."` e clique em **Deploy**.
+
+Na primeira abertura o app carrega o `churn.csv` (7.043 clientes) na tabela `customers`. Cada nova inferência é gravada na tabela `predictions`. O modelo exportado fica em `streamlit_cloud/champion/`; para trocar, rode `python -m src.export_champion` e copie `models/champion/` para lá.
+
 ---
 
 ## 7. Observações
