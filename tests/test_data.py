@@ -1,4 +1,3 @@
-import pandas as pd
 import pytest
 
 from churn.data import coerce_total_charges, drop_identifier, validate
@@ -20,8 +19,10 @@ def test_coerce_e_pura(raw_frame):
 
 
 def test_validate_falha_sem_coluna(raw_frame):
-    from churn.data import coerce_total_charges, drop_identifier
     import pandera.errors
+
+    from churn.data import coerce_total_charges, drop_identifier
+
     df = coerce_total_charges(drop_identifier(raw_frame, "customerID"))
     with pytest.raises((ValueError, pandera.errors.SchemaErrors)):
         validate(df.drop(columns=["Contract"]))

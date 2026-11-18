@@ -1,0 +1,16 @@
+name: Tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.9"
+      - run: uv sync --frozen --python 3.12
+      - run: uv run ruff check src tests streamlit_app.py
+      - run: uv run pytest -q
+        env:
+          MLFLOW_DISABLE_AGENT_HINT: "1"
+          MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR: "false"

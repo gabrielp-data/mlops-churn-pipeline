@@ -1,4 +1,5 @@
 """Utilitários de linhagem: versão do dado (DVC) e do código (Git)."""
+
 from __future__ import annotations
 
 import subprocess
@@ -15,9 +16,13 @@ def data_md5(dvc_pointer: Path = Path("data/churn.csv.dvc")) -> str:
 
 def git_commit() -> str:
     """Hash curto do commit atual — identifica a versão exata do código."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return "no-git"
     return result.stdout.strip() or "no-git"

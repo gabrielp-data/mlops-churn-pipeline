@@ -4,6 +4,7 @@ Funções puras (recebem/retornam DataFrame, sem efeito colateral) compostas por
 uma orquestração fina em ``load_clean``. A validação usa o schema pandera
 definido em ``schema.py`` — dado ruim para o pipeline cedo, não silenciosamente.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,13 +13,31 @@ import pandas as pd
 
 from churn.schema import ChurnSchema
 
-EXPECTED_COLUMNS: frozenset[str] = frozenset({
-    "customerID", "gender", "SeniorCitizen", "Partner", "Dependents", "tenure",
-    "PhoneService", "MultipleLines", "InternetService", "OnlineSecurity",
-    "OnlineBackup", "DeviceProtection", "TechSupport", "StreamingTV",
-    "StreamingMovies", "Contract", "PaperlessBilling", "PaymentMethod",
-    "MonthlyCharges", "TotalCharges", "Churn",
-})
+EXPECTED_COLUMNS: frozenset[str] = frozenset(
+    {
+        "customerID",
+        "gender",
+        "SeniorCitizen",
+        "Partner",
+        "Dependents",
+        "tenure",
+        "PhoneService",
+        "MultipleLines",
+        "InternetService",
+        "OnlineSecurity",
+        "OnlineBackup",
+        "DeviceProtection",
+        "TechSupport",
+        "StreamingTV",
+        "StreamingMovies",
+        "Contract",
+        "PaperlessBilling",
+        "PaymentMethod",
+        "MonthlyCharges",
+        "TotalCharges",
+        "Churn",
+    }
+)
 
 
 def load_raw(path: Path) -> pd.DataFrame:
@@ -38,7 +57,13 @@ def coerce_total_charges(df: pd.DataFrame) -> pd.DataFrame:
     gasto é, de fato, 0 — não um número mágico como no script original.
     """
     out = df.copy()
-    out["TotalCharges"] = pd.to_numeric(out["TotalCharges"], errors="coerce").fillna(0.0)
+    out["TotalCharges"] = (
+        pd.to_numeric(
+            out["TotalCharges"].replace(r"^\s*$", 0, regex=True), errors="raise"
+        )
+        .fillna(0.0)
+        .astype(float)
+    )
     return out
 
 
@@ -57,5 +82,7 @@ def load_clean(data_path: Path, id_column: str, target: str) -> pd.DataFrame:
     missing = EXPECTED_COLUMNS - set(df.columns)
     if missing:
         raise ValueError(f"Colunas ausentes no dataset: {sorted(missing)}")
+    if df[id_column].isna().any() or df[id_column].duplicated().any():
+        raise ValueError("customerID deve ser preenchido e único.")
     df = coerce_total_charges(drop_identifier(df, id_column))
     return validate(df)

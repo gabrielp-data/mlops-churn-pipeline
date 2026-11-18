@@ -4,10 +4,12 @@ Todo caminho, hiperparâmetro e constante mágica do script original vive aqui �
 nunca hardcoded no meio da lógica. Valores podem ser sobrescritos por variáveis
 de ambiente com prefixo ``CHURN_`` ou por um arquivo ``.env``.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +20,9 @@ class Settings(BaseSettings):
         env_prefix="CHURN_",
         env_file=".env",
         protected_namespaces=(),
+        extra="ignore",
+        env_ignore_empty=True,
+        populate_by_name=True,
     )
 
     # dados
@@ -27,12 +32,25 @@ class Settings(BaseSettings):
     positive_label: str = "Yes"
 
     # split / modelo
-    test_size: float = 0.25
+    test_size: float = Field(default=0.2, gt=0, lt=0.5)
+    validation_size: float = Field(default=0.25, gt=0, lt=0.5)
     random_state: int = 42
-    n_estimators: int = 200
+    n_estimators: int = Field(default=200, ge=1)
+    max_depth: int | None = None
 
     # saída
-    artifact_path: Path = Path("artifacts/churn_model.pkl")
+    tracking_uri: str = Field(
+        default="sqlite:///mlflow.db",
+        validation_alias=AliasChoices("CHURN_TRACKING_URI", "MLFLOW_TRACKING_URI"),
+    )
+    experiment_name: str = "churn"
+    model_name: str = "churn"
+    candidates_path: Path = Path("artifacts/candidates.json")
+    promotion_path: Path = Path("artifacts/champion.json")
+    champion_dir: Path = Path("models/champion")
+    batch_path: Path = Path("data/batch_predictions.parquet")
+    database_url: SecretStr | None = None
+    api_url: str = "http://127.0.0.1:8000"
 
 
 settings = Settings()
