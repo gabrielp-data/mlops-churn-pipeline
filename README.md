@@ -1,341 +1,141 @@
 # Previsão de Churn — Projeto Prático de MLOps
 
-Projeto da disciplina **Engenharia de Machine Learning Aplicada — princípios de MLOps** (IESB, Ciência de Dados e IA).
+**[Abrir o painel público: churn-gabriel.streamlit.app](https://churn-gabriel.streamlit.app)**
 
-O objetivo da disciplina não é a acurácia do modelo, e sim o **encanamento ao redor dele**. O ponto de partida é um script de churn que "só funciona na minha máquina" (`train_churn.py`, fornecido em aula); a cada encontro, uma dor de reprodutibilidade motiva uma ferramenta nova. O resultado é um sistema que valida e versiona os dados, rastreia experimentos, registra o melhor modelo e serve previsões em uma arquitetura de duas camadas na AWS.
+[![Tests](https://github.com/gabrielp-data/mlops-churn-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/gabrielp-data/mlops-churn-pipeline/actions/workflows/ci.yml)
 
-O plano completo da disciplina está em [`grade-mlops-60h.md`](grade-mlops-60h.md).
+Projeto de Gabriel para a disciplina **Engenharia de Machine Learning Aplicada — princípios de MLOps**, do IESB. A implementação segue como referência o [projeto de Caio](https://github.com/caiorj2004/mlops-churn-project). O plano da disciplina está em [grade-mlops-60h.md](grade-mlops-60h.md).
 
----
+O painel publicado consulta clientes no PostgreSQL, calcula previsões com um Random Forest exportado do MLflow e grava novas simulações no histórico. A aplicação roda no Streamlit Community Cloud e o banco fica em outro servidor. Não depende do computador do autor estar ligado.
 
-## Sumário
+## Publicação atual
 
-1. [O dado e o problema](#1-o-dado-e-o-problema)
-2. [Arquitetura final (AWS, duas camadas)](#2-arquitetura-final-aws-duas-camadas)
-3. [Linha do tempo: o que cada etapa construiu](#3-linha-do-tempo-o-que-cada-etapa-construiu)
-4. [Um modelo, do treino à produção](#4-um-modelo-do-treino-à-produção)
-5. [Estrutura do repositório](#5-estrutura-do-repositório)
-6. [Como executar](#6-como-executar)
-7. [Limitações conhecidas](#7-limitações-conhecidas)
+```text
+Navegador (HTTPS)
+       │
+       ▼
+Streamlit Community Cloud — streamlit_cloud/app.py
+       ├── modelo exportado + contrato de features
+       └── PostgreSQL gerenciado (conexão via Secrets)
+                 ├── customers: base pública IBM Telco
+                 └── predictions: histórico de simulações
+```
 
----
+O painel executa a inferência diretamente no processo do Streamlit. A API FastAPI e os containers são alternativas de execução local/AWS; não são serviços adicionais dessa publicação.
 
-## 1. O dado e o problema
-
-Classificação binária: prever se um cliente vai cancelar o serviço (`Churn = Yes/No`). O dataset e o modelo base (Random Forest) foram **fixados pelo professor**.
-
-| Característica | Valor |
+| Item | Estado verificado em 18/11/2026 |
 | --- | --- |
-| Arquivo | `data/raw/churn.csv` (versionado com DVC, não com Git) |
-| Linhas × colunas | 7.043 clientes × 21 colunas |
-| Identificador | `customerID` (único; ex.: `7000-QFVW`, `7015-DBER`) |
-| Alvo | `Churn`: 4.752 `No` / 2.291 `Yes` (**32,5 % de churn**) |
-| Numéricas | `tenure` (0–72 meses), `MonthlyCharges` (18,25–118,75), `TotalCharges` (texto no CSV; 11 valores em branco) |
-| Categóricas | 16 colunas (contrato, serviços, forma de pagamento etc.) |
+| Site | [churn-gabriel.streamlit.app](https://churn-gabriel.streamlit.app) |
+| Clientes no banco | 7.043 |
+| Modelo publicado | `churn-model`, versão 1, exportado do alias `@champion` |
+| Run | `rf-n500-d8` · `ad80f992061a43b48663a5fe53cc6dc6` |
+| Random Forest | 500 árvores, profundidade máxima 8 |
+| Acurácia registrada no artefato | 80,13% |
+| Consulta `7590-VHVEG` | 54,39% de probabilidade, classe 1, risco médio; churn observado `No` |
+| Simulação com os valores iniciais do formulário | 67,66%, classe 1, risco alto; registrada em `predictions` |
 
----
+A acurácia acima vem de [champion_info.json](streamlit_cloud/champion/champion_info.json); não é uma avaliação nova sobre o banco de produção. O primeiro exemplo é um erro de classificação do modelo, não uma promessa de previsão correta para cada cliente. O limite da classe é 50%; as faixas de risco são baixo (<30%), médio (30% a <60%) e alto (≥60%).
 
-## 2. Arquitetura final (AWS, duas camadas)
+## Dados e rastreabilidade
 
-```text
-[Navegador]
-     │ HTTP :8501
-     ▼
-┌── AWS us-east-2 (VPC padrão) ─────────────────────────────────────────────────┐
-│                                                                               │
-│  EC2 churn-app-host ("Modelo Servidor")         EC2 churn-db-host             │
-│  role IAM EC2-ECR-ReadRole (sem chaves fixas)                                 │
-│  ┌── container (imagem do ECR) ──────┐          ┌── container churn_postgres ┐│
-│  │ Supervisord                       │  SQL     │ PostgreSQL 15              ││
-│  │  ├─ Streamlit :8501 app_churn_v2  │  :5432   │ banco churn_db             ││
-│  │  └─ FastAPI   :8000 src/api_v2 ───┼─────────►│ tabela customers           ││
-│  │     + modelo em memória           │ IP priv. │ (churn.csv bruto, 7.043)   ││
-│  └───────────────────────────────────┘          └────────────────────────────┘│
-│                ▲ docker pull                                                  │
-│        Amazon ECR: app-churn-v1:latest                                        │
-└───────────────────────────────────────────────────────────────────────────────┘
-```
+A publicação inicializa `customers` com a [base pública IBM Telco em um commit fixo](https://github.com/IBM/watsonx-ai-samples/blob/e7345a897d3a440e0e8ee465150fe895bd5b29cb/cpd4.5/data/customer_churn/WA_FnUseC_TelcoCustomerChurn.csv): 7.043 registros, 21 colunas, 5.174 `No` e 1.869 `Yes` (26,54% de churn). Exemplos de códigos: `7590-VHVEG` e `5575-GNVDE`.
 
-* **Camada de aplicação:** um único container roda o backend (FastAPI) e o frontend (Streamlit), gerenciados pelo Supervisord. A imagem é publicada no Amazon ECR e baixada pela EC2 usando uma *IAM Role* (credenciais temporárias, nada de chave gravada em disco).
-* **Camada de dados:** PostgreSQL em Docker numa segunda EC2. O `churn.csv` bruto foi carregado na tabela `customers` (`CSV → postgres`).
-* As duas máquinas conversam pelo **IP privado** da VPC; a senha do banco entra no container em tempo de execução (`--env-file`) e nunca vai para o Git nem para a imagem.
+O MD5 desse CSV é `3a27ec1ff5c0a90dd61cefa8a13184ab`. O ponteiro histórico [data/raw/churn.csv.dvc](data/raw/churn.csv.dvc) registra outro hash (`d390bd07b5514a2256a2396993b8b0e3`). O metadado do campeão também registra esse hash histórico. **Não são evidência de que a base pública seja o mesmo arquivo do treino**; reproduzir a linhagem original requer recuperar a versão correspondente. Não há remote DVC configurado neste checkout.
 
-> **Status do deploy:** a arquitetura acima e os scripts de `infra/` estão prontos, mas este repositório **ainda não foi implantado na AWS**. As imagens abaixo vêm do projeto de referência (`caiorj2004/mlops-churn-project`) e mostram o resultado esperado.
+O artefato publicado inclui o modelo e o mapeamento/ordem de categorias em `feature_contract.json`. A transformação de inferência está em [src/features.py](src/features.py); categorias desconhecidas são recusadas. A aplicação usa a cópia exportada, e não acompanha alterações do alias no MLflow em tempo real.
 
-Resultado esperado (painel em produção na AWS, projeto de referência):
+## Estrutura
 
-| Bloco 1 — consulta por código no PostgreSQL | Bloco 2 — nova inferência em tempo real |
+| Caminho | Responsabilidade |
 | --- | --- |
-| ![Consulta 7015-DBER](docs/img/aws_v2_bloco1_consulta_postgres.png) | ![Inferência online](docs/img/aws_v2_bloco2_inferencia_online.png) |
+| `streamlit_cloud/app.py` | Painel público, consulta ao banco e histórico |
+| `streamlit_cloud/champion/` | Modelo publicado, contrato e metadados |
+| `streamlit_cloud/requirements.txt` | Dependências do painel; bibliotecas do modelo com versões fixas |
+| `src/data.py`, `src/schema.py`, `src/features.py` | Carga, validação e transformações |
+| `src/experiments.py`, `src/register_model.py` | Grid de treinamento e promoção no MLflow |
+| `src/export_champion.py`, `src/inference.py` | Exportação e consumo do campeão |
+| `src/api_v2.py`, `src/db.py` | API e conexão ao PostgreSQL para execução fora do Cloud |
+| `src/batch_scoring.py`, `src/api_lookup.py` | Previsões em lote e API de consulta |
+| `app_churn_v1.py`, `app_churn_v2.py`, `streamlit_app.py` | Interfaces para as APIs |
+| `tests/`, `.github/workflows/ci.yml` | Testes automáticos e integração com PostgreSQL |
+| `infra/`, `Dockerfile*`, `docker-compose.yml` | Alternativas de empacotamento e implantação AWS |
+| `dvc.yaml`, `dvc.lock`, `data/raw/churn.csv.dvc` | Pipeline e ponteiro DVC |
 
----
+## Executar o painel publicado localmente
 
-## 3. Linha do tempo: o que cada etapa construiu
-
-A disciplina segue os **três pipelines do ml-ops.org** (Data, ML e Software Code). Cada etapa abaixo traz a dor que a motivou, o que foi entregue e onde está no repositório.
-
-### Bloco 0 — Fundação
-
-**Encontros 1 e 2 · Git e estrutura de projeto.**
-*Dor:* um script único (`train_churn.py`) que ninguém consegue rodar, revisar ou colaborar.
-*Entrega:* o script foi quebrado em módulos por responsabilidade em `src/` (`config`, `data`, `features`, `models`, `evaluate`) e costurado por `run_pipeline.py`. O trabalho foi feito na branch `refactor/estrutura` e entrou na `main` pelo **Pull Request #1** (17/08).
-
-**Encontro 3 · Docker.**
-*Dor:* o projeto modular ainda dependia do ambiente de cada máquina.
-*Entrega:* `Dockerfile.treino` empacota o pipeline modular numa imagem (`churn:0.1`) sobre a base oficial do `uv`. As dependências vêm do `pyproject.toml`, travadas no `uv.lock`, e são instaladas **antes** do código, para aproveitar o cache de camadas. O `churn.csv` não entra na imagem: chega por volume, e o modelo treinado sai pelo volume `models/`.
-
-```powershell
-docker build -f Dockerfile.treino -t churn:0.1 .
-docker run --rm -v "${PWD}/data:/app/data" -v "${PWD}/models:/app/models" churn:0.1
-```
-
-### Bloco 1 — Data Pipeline
-
-**Encontro 4 · Profiling e validação de dados (Pandera).**
-*Dor:* dado sujo quebra o treino em silêncio.
-*Entrega:*
-* `src/profiling.py`: retrato do dado (tipos, estatísticas, nulos, distribuição do alvo).
-* `src/schema.py`: o **contrato de dados** `ChurnSchema` — `customerID` único, `tenure` entre 0 e 72, `MonthlyCharges` entre 18 e 120, `TotalCharges ≥ 0`, `Contract` e `Churn` só com categorias válidas.
-* `src/data.py`: `load_clean_data()` converte `TotalCharges` para número e valida o dado contra o contrato **antes** de qualquer feature (`lazy=True` junta todas as falhas).
-* `test_schema.py`: quebra o contrato de propósito em 3 linhas reais da base. Saída:
-
-```text
-        column                                            check failure_case
-    customerID                                 field_uniqueness    7000-QFVW
-    customerID                                 field_uniqueness    7000-QFVW
-        tenure                        less_than_or_equal_to(72)          999
-MonthlyCharges                   greater_than_or_equal_to(18.0)        -15.0
-      Contract isin(['Month-to-month', 'One year', 'Two year'])    Vitalicio
-```
-
-**Encontro 5 · Versionamento de dados (DVC).**
-*Dor:* "mudei o dataset e não sei qual modelo veio de qual versão".
-*Entrega:*
-* O `churn.csv` saiu do Git; no Git fica só o ponteiro `data/raw/churn.csv.dvc` (hash MD5 do conteúdo). Os bytes ficam no cache/remote do DVC.
-* Remote local configurado em `.dvc/config`.
-* Duas versões registradas e alternadas: a **v1** (base original, commit `56faa71`) e uma **v2** criada para o exercício, com uma linha extra `9999-DUMMY` mal formatada (commit `e6bcaf0`).
-* Um bom exemplo de Data Pipeline funcionando: ao treinar com a v2, o **Pandera barrou a linha suja** (`tenure` com texto, `Contract` inválido, `Churn` nulo). A linha foi removida e o ponteiro atual volta ao conteúdo original: `md5 d390bd07…`, 981.685 bytes — o mesmo hash do slide do Encontro 5. O ponteiro da v1 tinha hash `3a29edd8…` porque, naquela época, o arquivo estava com quebras de linha do Windows (CRLF); o conteúdo é o mesmo.
-
-### Bloco 2 — ML Pipeline (MLflow)
-
-**Encontro 6 · Tracking de experimentos.**
-*Dor:* "rodei vários experimentos e perdi qual foi o melhor".
-*Entrega:*
-* `src/train_mlflow.py`: treino com `mlflow.sklearn.autolog()` e tags de linhagem (`data_md5` do ponteiro DVC + `git_commit`).
-* `src/experiments.py`: **grid de 9 runs** (`n_estimators` ∈ {100, 200, 500} × `max_depth` ∈ {None, 8, 16}) no experimento `churn-prediction`, com backend SQLite (`mlflow.db`).
-
-Resultado do grid (acurácia no teste, 20 % estratificado, `random_state=42`):
-
-| run | n_estimators | max_depth | test_accuracy |
-| --- | --- | --- | --- |
-| **rf-n200-d8** | 200 | 8 | **0,7729** |
-| rf-n500-d8 | 500 | 8 | 0,7715 |
-| rf-n100-d8 | 100 | 8 | 0,7715 |
-| rf-n100-d16 | 100 | 16 | 0,7672 |
-| rf-n500-d16 | 500 | 16 | 0,7594 |
-| rf-n500-dNone | 500 | None | 0,7559 |
-| rf-n200-d16 | 200 | 16 | 0,7559 |
-| rf-n100-dNone | 100 | None | 0,7523 |
-| rf-n200-dNone | 200 | None | 0,7502 |
-
-`max_depth=8` domina; árvores mais profundas pioram (overfitting).
-
-**Encontro 7 · Model Registry.**
-*Entrega:* `src/register_model.py` busca o melhor run por código (`mlflow.search_runs` ordenado por `test_accuracy`), registra-o como **`churn-model`** e aponta o alias **`@champion`** para essa versão. `src/test_champion.py` consome o modelo pela URI estável `models:/churn-model@champion` (flavor `pyfunc`). A cadeia de linhagem fica completa: dado (DVC) → código (Git) → experimento (MLflow) → modelo (`@champion`).
-
-**Orquestração do ML Pipeline com DVC.** `dvc.yaml` declara duas etapas, `treino_e_tuning` (`python -m src.experiments`) e `promover_modelo` (`python -m src.register_model`), executadas com `dvc repro`.
-
-### Serviço do modelo
-
-**FastAPI + MLflow (`src/main.py`).**
-*Tarefa:* o usuário informa o código do cliente e recebe a predição do `@champion` junto com as informações do modelo.
-*Rotas:*
-* `GET /predict/{customer_id}`
-* `POST /predict` — permite simular outros valores de `tenure`, `MonthlyCharges` e `TotalCharges` para um cliente existente.
-* `GET /model-info` — versão, run, acurácia, hiperparâmetros e linhagem.
-
-As features são montadas com as **mesmas funções do treino**. Para `7015-DBER`, a API devolve `churn_prediction = 0`, idêntico ao modelo aplicado diretamente sobre a base.
-
-**Streamlit + docker compose.** `streamlit_app.py` é um painel para essa API. `docker-compose.yml` sobe os dois serviços (`Dockerfile.api` e `Dockerfile.streamlit`). A imagem da API copia o `mlflow.db` e o `mlruns/` locais, então as etapas do MLflow precisam ter sido executadas antes do `docker compose up --build`.
-
-### Deploy na AWS
-
-**app-churn-v1 · uma imagem Docker para front e backend, sem inferência.**
-*Pedido:* "Como sirvo um modelo de ML usando uma mesma imagem Docker para front e backend? Não faz inferência; apenas consulta resultados já existentes."
-*Entrega:*
-* `src/batch_scoring.py` aplica o `@champion` aos 7.043 clientes reais em lote e grava `data/batch_predictions.parquet`.
-* `src/api_lookup.py` (FastAPI) apenas consulta esse arquivo.
-* `app_churn_v1.py` (Streamlit) é a tela.
-* O `Dockerfile` + `supervisord.conf` juntam tudo num container.
-* A imagem é publicada no ECR (`infra/deploy_ecr.ps1`) e executada numa EC2 (`infra/setup_ec2.sh`) com IAM Role (`infra/iam_trust_ec2.json`).
-
-**app-churn-v2 · inferência em tempo real.**
-*Pedido:* a API passa a receber parâmetros para uma nova inferência; a tela tem a consulta por código e um bloco "nova inferência" com o resultado na tela.
-*Entrega:*
-* `src/api_v2.py` com `POST /predict`.
-* `app_churn_v2.py` com os dois blocos.
-
-**app-churn-v2 em duas camadas (PostgreSQL).**
-*Pedido:* uma EC2 com o Docker do app/modelo, outra EC2 com PostgreSQL em Docker e o CSV carregado no banco.
-*Entrega:*
-* `infra/setup_db_ec2.sh` e `infra/db/init_customers.sql` sobem o Postgres e carregam o `churn.csv` bruto (`COPY 7043`).
-* `src/db.py` conecta via variáveis de ambiente.
-* `src/api_v2.py` passa a fazer `SELECT` no banco e o `@champion` calcula o score sobre o registro retornado (`GET /model-info` mostra a versão em uso).
-* `app_churn_v2.py` mostra o registro do banco, a previsão e o churn real.
-
-Resultado: `7015-DBER` → 47,16 %, classe 0 (risco Médio), churn real `Yes`, `data_source: postgresql`, modelo `churn-model` @champion (`rf-n200-d8`).
-
----
-
-## 4. Um modelo, do treino à produção
-
-Todos os serviços do projeto usam **o mesmo modelo**: a versão do `churn-model` apontada pelo alias `@champion` no MLflow Model Registry (hoje, o run `rf-n200-d8`).
-
-```text
-churn.csv (DVC) → src/experiments.py (grid MLflow) → src/register_model.py (@champion)
-               → src/export_champion.py (models/champion/) → docker build → ECR → EC2
-```
-
-* **Contrato de features.** O modelo recebe números, mas os dados chegam como texto (`"Female"`, `"Month-to-month"`...). Cada run do grid salva no MLflow um `feature_contract.json` com o código de cada categoria e a ordem das colunas usadas no treino. A inferência (`src/features.py → features_for_inference`) aplica esse contrato, então um cliente vindo do PostgreSQL ou do formulário é transformado **exatamente** como no treino. Categoria fora do contrato (ex.: `Contract = "Vitalicio"`) é recusada com erro 422, sem chute.
-* **Exportação.** O Model Registry vive no `mlflow.db` local. Antes do build, `src/export_champion.py` copia para `models/champion/` o pacote MLflow Models da versão `@champion`, o contrato de features e um `champion_info.json` com versão, run, acurácia e linhagem (`data_md5` do DVC + `git_commit`). O `infra/deploy_ecr.ps1` faz isso automaticamente.
-* **Mesmo ambiente.** O MLflow salva com o modelo as versões exatas das bibliotecas do treino (`models/champion/requirements.txt`), e a imagem instala exatamente essas versões.
-* **Quem usa.** API do MLflow (`src/main.py`, carregando do registry), API da v2 (`src/api_v2.py`), lote da v1 (`src/batch_scoring.py`). Para `7015-DBER`, todos respondem probabilidade **0,4716** → classe 0 (risco Médio); o churn real desse cliente é `Yes`, um erro do modelo perto da fronteira de decisão.
-* **Verificação.** As probabilidades do lote foram comparadas com o `@champion` carregado direto do registry para os 7.043 clientes: diferença máxima de 0,0.
-
----
-
-## 5. Estrutura do repositório
-
-```text
-mlops-churn-project/
-├── README.md                  ← este documento
-├── grade-mlops-60h.md         ← plano da disciplina (professor)
-├── pyproject.toml / uv.lock   ← dependências travadas do container de treino (Encontros 2–3)
-├── Dockerfile.treino          ← Encontro 3: imagem churn:0.1 que roda o run_pipeline.py
-├── requirements.txt           ← dependências do ambiente local de desenvolvimento (e do Dockerfile.api)
-├── requirements-app.txt       ← dependências extras da imagem da aplicação AWS (banco, Streamlit)
-├── .env.example               ← modelo das variáveis de conexão com o banco (o .env real é ignorado)
-├── .gitignore / .dvcignore
-│
-├── data/raw/
-│   ├── churn.csv.dvc          ← ponteiro DVC do dataset (o CSV em si não vai para o Git)
-│   └── .gitignore
-├── .dvc/config                ← remote DVC (local)
-├── dvc.yaml                   ← pipeline DVC: treino_e_tuning → promover_modelo
-│
-├── run_pipeline.py            ← Bloco 0: pipeline modular (validar → features → treinar → avaliar → salvar)
-├── test_schema.py             ← Bloco 1: quebra proposital do contrato Pandera
-├── src/
-│   ├── config.py              ← caminhos e hiperparâmetros num lugar só
-│   ├── data.py                ← carga + validação com o ChurnSchema
-│   ├── schema.py              ← contrato de dados (Pandera)
-│   ├── profiling.py           ← profiling do dataset
-│   ├── features.py            ← engenharia de atributos e encoding
-│   ├── models.py              ← treino do Random Forest
-│   ├── evaluate.py            ← métrica e serialização do modelo
-│   ├── train_mlflow.py        ← Bloco 2: treino com autolog + linhagem
-│   ├── experiments.py         ← Bloco 2: grid de 9 runs no MLflow
-│   ├── register_model.py      ← Bloco 2: registry + alias @champion
-│   ├── test_champion.py       ← Bloco 2: consumo de models:/churn-model@champion
-│   ├── main.py                ← FastAPI servindo o @champion
-│   ├── export_champion.py     ← exporta o @champion do registry para models/champion/ (antes do build)
-│   ├── batch_scoring.py       ← AWS v1: pontuação em lote → parquet
-│   ├── api_lookup.py          ← AWS v1: API de consulta ao parquet
-│   ├── api_v2.py              ← AWS v2: consulta no PostgreSQL + inferência online
-│   ├── db.py                  ← AWS v2: conexão com o PostgreSQL via variáveis de ambiente
-│   └── inference.py           ← AWS: carrega o @champion exportado e calcula as probabilidades
-│
-├── streamlit_app.py           ← painel da API do @champion
-├── docker-compose.yml         ← sobe API (Dockerfile.api) + painel (Dockerfile.streamlit)
-├── Dockerfile.api / Dockerfile.streamlit
-│
-├── app_churn_v1.py            ← tela da app-churn-v1 (consulta em lote)
-├── app_churn_v2.py            ← tela da app-churn-v2 (consulta no banco + nova inferência)
-├── Dockerfile                 ← imagem única da aplicação AWS (FastAPI + Streamlit)
-├── supervisord.conf           ← processos dentro do container (backend :8000, frontend :8501)
-│
-├── infra/
-│   ├── README.md              ← topologia e passo a passo de implantação na AWS
-│   ├── deploy_ecr.ps1         ← build + push da imagem para o ECR (Windows)
-│   ├── setup_ec2.sh           ← deploy na EC2 da aplicação
-│   ├── setup_db_ec2.sh        ← provisiona o PostgreSQL na EC2 do banco
-│   ├── iam_trust_ec2.json     ← trust policy da role EC2-ECR-ReadRole
-│   └── db/init_customers.sql  ← DDL da tabela customers + carga do CSV
-└── docs/img/                  ← evidências do painel em produção
-```
-
-Artefatos gerados localmente e **ignorados pelo Git**: `mlflow.db`, `mlruns/`, `models/`, `data/batch_predictions.parquet`, `.venv/`, `.env`.
-
----
-
-## 6. Como executar
-
-Pré-requisitos: Python 3.11+, Git, DVC e Docker. Os comandos abaixo são do **PowerShell (Windows)**, na raiz do projeto.
+Python 3.12, na raiz do repositório:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-# O DVC deste repositório ainda não tem remote: baixe a base pública (mesmos 7.043 clientes)
-New-Item -ItemType Directory -Force data/raw | Out-Null
-Invoke-WebRequest -OutFile data/raw/churn.csv "https://raw.githubusercontent.com/IBM/watsonx-ai-samples/e7345a897d3a440e0e8ee465150fe895bd5b29cb/cpd4.5/data/customer_churn/WA_FnUseC_TelcoCustomerChurn.csv"
+python -m pip install -r streamlit_cloud/requirements.txt
+streamlit run streamlit_cloud/app.py
 ```
 
-**Pipeline modular dentro do container (Encontro 3)**
-```powershell
-docker build -f Dockerfile.treino -t churn:0.1 .
-docker run --rm -v "${PWD}/data:/app/data" -v "${PWD}/models:/app/models" churn:0.1
+Configure `.streamlit/secrets.toml` (ignorado pelo Git) com uma conexão PostgreSQL dedicada à demonstração:
+
+```toml
+DB_URL = "postgresql://USUARIO:SENHA@HOST/BANCO?sslmode=require"
 ```
 
-**Data Pipeline e pipeline modular**
+O painel cria `customers` e `predictions` se ainda não existirem. Usa o CSV público para a carga inicial; não sobrescreve uma tabela já existente. A conexão precisa ter permissão para criar tabelas, consultar clientes e inserir previsões.
+
+## Publicar no Streamlit Community Cloud
+
+1. Crie um banco PostgreSQL gerenciado e obtenha a conexão com SSL.
+2. Em [share.streamlit.io](https://share.streamlit.io), selecione este repositório, a branch `claude/great-thompson-kkpvpv` e o arquivo `streamlit_cloud/app.py`.
+3. Em **Advanced settings → Secrets**, configure `DB_URL`. Use Python 3.12.
+4. Publique e verifique consulta, nova inferência e histórico.
+
+Atualizações na branch conectada são refletidas no aplicativo. Para trocar o modelo, exporte o campeão validado e atualize `streamlit_cloud/champion/` e as dependências correspondentes. Nunca publique credenciais no código, README ou histórico Git.
+
+## Treinamento e execução com API
+
+Instale `requirements.txt` em um ambiente próprio para desenvolvimento. Disponibilize a versão correta do dado em `data/raw/churn.csv` antes de executar:
+
 ```powershell
-python -m src.profiling                  # retrato do dataset
-python test_schema.py                    # o contrato pandera barrando dados adulterados
-python run_pipeline.py                   # valida → features → treina → avalia → salva models/churn_rf.pkl
+python -m src.profiling
+python run_pipeline.py
+python -m src.experiments
+python -m src.register_model
+python -m src.export_champion
+python -m mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
 
-**ML Pipeline (MLflow)**
-```powershell
-python -m src.experiments                # grid de 9 runs
-python -m src.register_model             # registra o melhor e aplica @champion
-python -m src.test_champion              # consome models:/churn-model@champion
-python -m mlflow ui --backend-store-uri sqlite:///mlflow.db   # http://127.0.0.1:5000
-python -m dvc repro                      # alternativa: roda as duas etapas pelo dvc.yaml
-```
+`dvc repro` encadeia treinamento/tuning e promoção; recuperar o dado via DVC depende de configurar o armazenamento da versão original. Usar outra base exige atualizar e documentar sua versão, sem reutilizar o hash antigo como se fosse equivalente.
 
-**API do @champion + painel**
-```powershell
-python -m uvicorn src.main:app --port 8000 --reload          # http://127.0.0.1:8000/docs
-streamlit run streamlit_app.py
-```
+Para a API v2, configure as variáveis de `.env.example`, mantenha o modelo em `models/champion/` e execute:
 
-**app-churn-v2 (local, conectando no PostgreSQL da AWS)**
 ```powershell
-copy .env.example .env                   # preencha DB_HOST (IP público da churn-db-host) e DB_PASSWORD
-python -m src.export_champion            # copia o @champion do registry para models/champion/
-python -m uvicorn src.api_v2:app --port 8000 --reload
+python -m uvicorn src.api_v2:app --port 8000
 streamlit run app_churn_v2.py
 ```
 
-**Deploy na AWS:** veja [`infra/README.md`](infra/README.md).
+O fluxo AWS proposto usa ECR, uma EC2 da aplicação (FastAPI + Streamlit) e outra EC2 do PostgreSQL. **Não foi implantado nesta conta AWS.** Os passos estão em [infra/README.md](infra/README.md). As imagens em `docs/img/aws_*` pertencem ao projeto de referência e não comprovam uma implantação AWS deste repositório.
 
-**Deploy gratuito no Streamlit Community Cloud (app + PostgreSQL separados)**
+## Testes automáticos
 
-O Streamlit Cloud roda um processo só, então a pasta `streamlit_cloud/` traz um painel que aplica o `@champion` direto (mesmo contrato de features do treino) e usa um PostgreSQL gerenciado em outro servidor (ex.: Neon, grátis).
+```powershell
+python -m pip install -r requirements-test.txt
+python -m pytest -q
+```
 
-1. Crie um projeto no [Neon](https://neon.tech) e copie a *connection string* (`postgresql://...?sslmode=require`).
-2. Em [share.streamlit.io](https://share.streamlit.io), entre com o GitHub e clique em **Create app** → repositório `mlops-churn-pipeline`, branch padrão, arquivo `streamlit_cloud/app.py`.
-3. Em **Advanced settings → Secrets**, cole `DB_URL = "postgresql://..."` e clique em **Deploy**.
+A suíte usa o modelo efetivamente publicado e cobre:
 
-Na primeira abertura o app carrega o `churn.csv` (7.043 clientes) na tabela `customers`. Cada nova inferência é gravada na tabela `predictions`. O modelo exportado fica em `streamlit_cloud/champion/`; para trocar, rode `python -m src.export_champion` e copie `models/champion/` para lá.
+- validação de dados inválidos, IDs duplicados, categorias e clientes com tempo zero;
+- consistência da previsão entre API e painel;
+- cliente ausente, IDs com caracteres SQL, entrada inválida e falha do banco;
+- consulta e simulação pelo Streamlit, gravação do histórico sem duplicar a cada atualização;
+- histórico vazio e preenchido sem expor objetos internos do Streamlit.
 
----
+Localmente os testes usam SQLite temporário. O [GitHub Actions](https://github.com/gabrielp-data/mlops-churn-pipeline/actions/workflows/ci.yml) executa a mesma suíte contra PostgreSQL 16 real, com banco efêmero e esquema isolado por teste. Não usa o banco nem os segredos de produção. Para repetir com um PostgreSQL de teste, configure `TEST_DATABASE_URL` em uma base descartável com permissão para criar esquemas.
 
-## 7. Observações
+`pytest.ini` limita a coleta a `tests/`: `test_schema.py` e `src/test_champion.py` são scripts didáticos que dependem de dados/registry locais, não testes isolados.
 
-* **Dependências parcialmente travadas:** o container de treino (`uv.lock`) e as bibliotecas do modelo na imagem da AWS (`models/champion/requirements.txt`) têm versões exatas; o `requirements.txt` do ambiente local e o `requirements-app.txt` declaram versões mínimas (`>=`).
-* **Testes:** a validação de dados tem um script de quebra proposital (`test_schema.py`), mas o projeto ainda não tem uma suíte `pytest`.
-* **Etapas do plano não implementadas neste repositório:** orquestração com Airflow, CI/CD com GitHub Actions e monitoramento de drift com Evidently (previstos na `grade-mlops-60h.md`).
-* **MLflow recente + uv:** `src/__init__.py` define `MLFLOW_UV_AUTO_DETECT=false`. Sem isso, com MLflow 3.x e o `uv` instalado, o autolog tenta exportar as dependências pelo `uv.lock` e falha em silêncio, sem salvar o modelo.
-* **Resultados do grid:** a tabela da seção 3 é do projeto de referência. Com outras versões das bibliotecas o campeão pode mudar (ex.: com scikit-learn 1.9 e MLflow 3.18, `rf-n100-d8` com 0,7999).
-* **IP público das EC2:** muda a cada parada/início das instâncias. A comunicação entre as máquinas usa o IP privado e não é afetada.
+## Limitações conhecidas
+
+- Demonstração acadêmica com dados públicos, sem autenticação: qualquer visitante pode simular e visualizar o histórico recente. Não inserir dados pessoais reais.
+- O formulário fixa alguns atributos de perfil e usa `meses × mensalidade` quando o total é zero; os resultados representam essas hipóteses.
+- O pipeline atual seleciona o campeão pela acurácia de teste. Uma avaliação imparcial requer separar validação para escolha e um teste final reservado.
+- A linhagem do modelo exportado precisa ser reconciliada com os bytes do dado de treino; os testes de serving não revalidam a métrica de treinamento.
+- Airflow, retreinamento automático e monitoramento de drift não estão implementados.
